@@ -55,6 +55,23 @@ namespace SmoothServer
         // ConsumeReloadSummaries. Static because StatsLog reads it without an instance.
         private static readonly List<string> _statReloads = new List<string>();
 
+        /// <summary>
+        /// Called on the main thread after every successful Config.Reload(), before the
+        /// file's write time is re-read - so anything this hook itself saves is absorbed
+        /// into the reload that triggered it instead of scheduling another one. 0.4.0 uses
+        /// it to re-assert the tuning profile over whatever the file just said.
+        /// </summary>
+        internal static Action AfterReload;
+
+        /// <summary>
+        /// True only while Config.Reload() is walking the file. BepInEx raises SettingChanged
+        /// per entry AS it reads, in file order, so a handler that reacts to one entry by
+        /// writing others would be half-undone by the entries the reload has not reached yet.
+        /// Handlers that only need to run once per reload check this and let
+        /// <see cref="AfterReload"/> do the work instead.
+        /// </summary>
+        internal static bool Reloading { get; private set; }
+
         /// <summary>StatsLog: reload change summaries since the last call, then reset.</summary>
         internal static List<string> ConsumeReloadSummaries()
         {
@@ -167,8 +184,16 @@ namespace SmoothServer
 
             bool wasSaveOnSet = _cfg.SaveOnConfigSet;
             _cfg.SaveOnConfigSet = false;
+            Reloading = true;
             try { _cfg.Reload(); }
-            finally { _cfg.SaveOnConfigSet = wasSaveOnSet; }
+            finally { Reloading = false; _cfg.SaveOnConfigSet = wasSaveOnSet; }
+
+            var after = AfterReload;
+            if (after != null)
+            {
+                try { after(); }
+                catch (Exception e) { _log.LogError(_logPrefix + " post-reload hook threw: " + e); }
+            }
 
             _lastReloadUtc = DateTime.UtcNow;
             _lastKnownWriteUtc = SafeGetLastWriteUtc();

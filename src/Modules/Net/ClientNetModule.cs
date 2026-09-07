@@ -52,12 +52,12 @@ namespace SmoothServer.Net
             _highWater = BindSynced("HighWaterBytes", 49152,
                 "Client: bytes of queued data above which this client stops adding ZDOs for a " +
                 "peer. Vanilla 10240. 48 KB is BetterNetworking's largest setting and roughly " +
-                "5x the vanilla bandwidth-delay ceiling at 100 ms RTT.");
+                "5x the vanilla bandwidth-delay ceiling at 100 ms RTT." + Profiles.Note);
             _sendRateMax = BindLocal("SendRateMaxBytesPerSec", 1048576,
                 "Client: Steam's per-connection maximum send rate, in bytes/sec. Vanilla pins " +
                 "this to 153600. This is a ceiling for bursts, not a target - Steam's estimator " +
                 "still decides the real rate. SendRateMin is deliberately left at vanilla. " +
-                "Machine-local: it describes YOUR uplink, not the server's.");
+                "Machine-local: it describes YOUR uplink, not the server's." + Profiles.Note);
         }
 
         protected override void ApplyPatches()

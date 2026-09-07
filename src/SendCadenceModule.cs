@@ -37,7 +37,7 @@ namespace SmoothServer
                 "sweep over all peers. While on, BetterNetworking's Update Rate option is inert.");
             _sendHz = cfg.Bind("SendCadence", "SendHz", 20f,
                 "Times per second the server pushes ZDO updates to every peer. Vanilla is " +
-                "effectively 20Hz divided by peer count. Clamped to 1-60.");
+                "effectively 20Hz divided by peer count. Clamped to 1-60." + Profiles.Note);
             Watch(_sendHz);
         }
 

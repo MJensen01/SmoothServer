@@ -28,7 +28,7 @@ namespace SmoothServer
     {
         public const string PluginGuid = "Nosferatu.SmoothServer";
         public const string PluginName = "SmoothServer";
-        public const string PluginVersion = "0.3.1";
+        public const string PluginVersion = "0.4.0";
 
         internal static ManualLogSource Log;
         internal static ConfigFile Cfg;
@@ -98,6 +98,10 @@ namespace SmoothServer
             EnforceClientMod.SettingChanged += (s, a) => ApplyEnforcement();
             ApplyEnforcement();
 
+            // 0.4.0: the tuning preset. Bound here so it sits with the other plugin-level
+            // entries; applied further down, once every module has bound its own config.
+            Profiles.Bind();
+
             Log.LogInfo("ServerSync initialised: id=" + ConfigSync.Name +
                         " display=" + ConfigSync.DisplayName +
                         " CurrentVersion=" + ConfigSync.CurrentVersion +
@@ -131,6 +135,11 @@ namespace SmoothServer
                 catch (Exception e) { Log.LogError("[" + m.Name + "] config bind failed: " + e); }
             }
 
+            // Presets, before ANY module installs a patch: a profile writes its values into
+            // the entries that are already bound, so every module below reads - and logs -
+            // the number it is actually going to run with. See Profiles.cs.
+            Profiles.Apply("startup");
+
             // Patches are installed now (ZNet.Start -> ServerLoadWorld happens too late for
             // some hooks), but every patch body gates on its side at runtime.
             foreach (var m in Modules) m.TryEnable(PluginGuid, RunningSide);
@@ -147,6 +156,7 @@ namespace SmoothServer
             // Config.Reload() (debounced, on the main thread via Update()) so edits on a
             // running server take effect without a restart. See ConfigWatcher.cs.
             _configWatcher = new ConfigWatcher(Cfg, Log, "[Config]");
+            ConfigWatcher.AfterReload = () => Profiles.Apply("cfg reload");
 
             Log.LogInfo("SmoothServer " + PluginVersion + " loaded, " + Modules.Count + " modules");
         }
@@ -253,6 +263,7 @@ namespace SmoothServer
             var parts = new List<string>();
             foreach (var m in Modules) parts.Add(m.Name + "=" + m.Status);
             Log.LogInfo("SmoothServer module summary: " + string.Join(", ", parts.ToArray()));
+            Log.LogInfo(Profiles.Summary());
 
             Log.LogInfo("SmoothServer " + PluginVersion + " (" + (IsServerSide ? "server" : "client") + " half)" +
                         "  EnforceClientMod=" + EnforceClientMod.Value +

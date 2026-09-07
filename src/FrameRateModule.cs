@@ -36,7 +36,7 @@ namespace SmoothServer
                 "TargetFrameRate is 0.");
             _target = cfg.Bind("FrameRate", "TargetFrameRate", 0,
                 "Server frame rate cap. 0 = leave vanilla (Unity's headless default, ~30). " +
-                "Set 60 or 120 to raise it. -1 = uncapped (burns a whole core).");
+                "Set 60 or 120 to raise it. -1 = uncapped (burns a whole core)." + Profiles.Note);
             Watch(_target);
         }
 

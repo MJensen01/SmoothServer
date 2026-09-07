@@ -2,7 +2,7 @@
   <PropertyGroup>
     <AssemblyName>SmoothServer</AssemblyName>
     <RootNamespace>SmoothServer</RootNamespace>
-    <Version>0.3.1</Version>
+    <Version>0.4.0</Version>
     <OutputPath>bin/</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Vendor/ServerSync.cs is written with nullable reference annotations.

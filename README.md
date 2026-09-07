@@ -37,13 +37,42 @@ descriptions in [`docs/MODULES.md`](docs/MODULES.md); install/usage detail in
 
 - `[General]` — `Mode` (Auto/Server/Client), `EnforceClientMod` (default false), `HotReload`,
   `SteamSelfTest`.
+- `[Profiles]` — `Profile` (`Default` / `FastLink` / `Custom`), the one-setting preset for
+  the whole mod. See below.
 - Server: `Telemetry`, `FrameRate`, `SendCadence`, `SendBudget`, `CreateBudget`, `PeerTelemetry`,
   `AdaptiveBudget`, `SteamRates`, `SendQueueGuard`, `SyncListCache`, `VPOServer`, `AsyncSave`,
   `GcThrottle`, `OwnershipRelease`, `MapSelfTest`, `StatsLog`.
-- Both ends: `Compression`, `Map` (SharedMap). Client only: `Client` (ClientNet).
+- Both ends: `Compression`, `LowLatency`, `Map` (SharedMap). Client only: `Client`
+  (ClientNet), `SmoothMotion` (off by default).
 - `HotReload` — cfg edits on a running server are picked up live, no restart, for almost every
   module (a handful of settings need a restart — see the Hot-reload column in
   [`docs/MODULES.md`](docs/MODULES.md)).
+
+## Profiles — `FastLink`
+
+`[Profiles] Profile` tunes the whole mod with one setting. It is a preset, not a feature: it
+writes a fixed table of values into settings that already exist, at load, whenever the profile
+changes, and after every live cfg reload — so the cfg file, `tools/cfg.py get` and each
+module's own log line always agree on the one number that is running.
+
+| Profile | What it does |
+| --- | --- |
+| `Default` | The ten keys below are forced back to their shipped defaults. |
+| `FastLink` | *"Make it feel like LAN"* — a small group on strong PCs and good links. |
+| `Custom` | The plugin overrides nothing; every value in the file stands. |
+
+`FastLink` sets exactly: `[SendCadence] SendHz=60`, `[AdaptiveBudget] CeilingBytes=262144`
+`FloorBytes=32768`, `[SteamRates] SendRateMax=4194304`, `[Client] HighWaterBytes=131072`
+`SendRateMaxBytesPerSec=4194304`, `[Compression] Enabled=true`, `[LowLatency] NagleMicros=0`,
+`[FrameRate] TargetFrameRate=60`, `[CreateBudget] MaxCreatedPerFrame=20`. Nothing else is
+touched, and every affected key says so in its own cfg description.
+
+`Profile` is **synced**, so a client joining a `FastLink` server runs `FastLink` too —
+including the machine-local keys ServerSync does not push. Hand-tuning belongs on
+`Profile=Custom`: on `Default` or `FastLink` the plugin re-asserts its table over a hand edit
+(and logs that it did).
+
+`tools/cfg.py preset ss fastlink|default|custom` flips it on a running server.
 
 ## Stats logging
 
@@ -89,10 +118,11 @@ python scripts\package.py   # builds thunderstore/dist zip
 
 ## Versioning
 
-Currently `0.3.1` (renamed from `OrionNet` at 0.2.0; 0.3.0 added the optional client half,
+Currently `0.4.0` (renamed from `OrionNet` at 0.2.0; 0.3.0 added the optional client half,
 compression, the shared map and per-peer adaptive budgets; 0.3.1 fixed a server-build Steam
 interface bug in `SendQueueGuard`/`SteamRates`/`PeerTelemetry` and added `StatsLog` + the
-`tools/` analysis scripts). See [`thunderstore/CHANGELOG.md`](thunderstore/CHANGELOG.md) for the
+`tools/` analysis scripts; 0.4.0 added the `FastLink` profile, the `LowLatency` module and
+the client-side `SmoothMotion` module). See [`thunderstore/CHANGELOG.md`](thunderstore/CHANGELOG.md) for the
 full history.
 
 Name and Thunderstore namespace are **final**: package namespace/team `Nosferatu`, package

@@ -81,10 +81,10 @@ namespace SmoothServer
                 "Replace SendBudget's single HighWaterBytes number with a per-peer target derived " +
                 "from that peer's live RTT and throughput, backing off on real congestion.");
             _floor = cfg.Bind("AdaptiveBudget", "FloorBytes", 16384,
-                "Never budget a peer below this many bytes. Vanilla is 10240 for everyone.");
+                "Never budget a peer below this many bytes. Vanilla is 10240 for everyone." + Profiles.Note);
             _ceiling = cfg.Bind("AdaptiveBudget", "CeilingBytes", 131072,
                 "Never budget a peer above this many bytes. Steam's own send queue starts erroring " +
-                "well above this; 128KB is a deliberate safety margin.");
+                "well above this; 128KB is a deliberate safety margin." + Profiles.Note);
             _k = cfg.Bind("AdaptiveBudget", "K", 2.0f,
                 "Multiplier on the bandwidth-delay product (outBytesPerSec * RTT). 1.0 exactly fills " +
                 "the pipe; 2.0 leaves headroom for bursts. Clamped to 0.5-8.");

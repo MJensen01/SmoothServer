@@ -32,7 +32,7 @@ namespace SmoothServer
                 "Make ZNetScene's per-frame object instantiation budget configurable.");
             _max = cfg.Bind("CreateBudget", "MaxCreatedPerFrame", 10,
                 "Objects ZNetScene may instantiate per frame outside the loading screen. " +
-                "Vanilla 10 - the default is deliberately vanilla, raise it to test.");
+                "Vanilla 10 - the default is deliberately vanilla, raise it to test." + Profiles.Note);
             Watch(_max);
         }
 

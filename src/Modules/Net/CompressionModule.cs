@@ -55,6 +55,12 @@ namespace SmoothServer.Net
         public override ModuleSide Side => ModuleSide.Both;
         public override string Section => "Compression";
 
+        protected override string EnabledDescription =>
+            "zstd-compress every ZSteamSocket payload, using a dictionary trained on real "
+            + "Valheim traffic. Both ends must run SmoothServer for a peer to be framed; a "
+            + "vanilla joiner silently stays uncompressed, so this is safe to leave on."
+            + Profiles.Note;
+
         /// <summary>Wire protocol version. Bump on any framing change.</summary>
         private const int Proto = 1;
 

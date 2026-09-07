@@ -60,7 +60,7 @@ namespace SmoothServer
             _sendRateMax = cfg.Bind("SteamRates", "SendRateMax", 1048576,
                 "Upper bound (bytes/sec) on Steam's per-connection bandwidth estimate. Vanilla " +
                 "153600. Raising this only lets the estimator climb during bursts - it is a " +
-                "ceiling, not a target. 0 = leave vanilla.");
+                "ceiling, not a target. 0 = leave vanilla." + Profiles.Note);
             _sendRateMin = cfg.Bind("SteamRates", "SendRateMin", 0,
                 "Lower bound (bytes/sec). 0 = LEAVE VANILLA (recommended). Raising this forbids " +
                 "Steam's congestion control from backing off for a peer on a weak link, which " +
