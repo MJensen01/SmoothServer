@@ -1,0 +1,9 @@
+{
+  "name": "SmoothServer",
+  "version_number": "0.2.0",
+  "website_url": "https://github.com/MJensen01/SmoothServer",
+  "description": "Server-only networking tuning for Valheim dedicated servers: frame rate, ZDO send cadence and budgets, telemetry. Nothing to install on clients.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2333"
+  ]
+}
