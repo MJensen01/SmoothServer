@@ -30,7 +30,7 @@ jobs:
         id: cache
         with:
           path: lib/
-          key: gamelibs-${{ steps.buildid.outputs.buildid }}
+          key: gamelibs-v2-${{ steps.buildid.outputs.buildid }}
 
       # DepotDownloader: anonymous Steam login, app 896660 depot 896661 (Linux dedicated server CONTENT; 1004/1005/1006 are only the Steam runtime redist — first CI run proved that).
       # Verified in BUILD-PIPELINE.md §2 this session; re-check `-branch` / auth requirements
