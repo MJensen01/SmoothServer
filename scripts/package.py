@@ -20,6 +20,18 @@ import zipfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(REPO_ROOT, "dist")
 
+# Assemblies SmoothServer needs at runtime that do NOT ship with Valheim or BepInEx.
+# ZstdSharp is the pure-managed zstd port used by the Compression module; the System.*
+# assemblies are its net472 dependencies (Span<T> and friends). The csproj's
+# TrimBuildOnlyOutputs target makes sure bin/ contains exactly these and nothing else.
+RUNTIME_DEPS = (
+    "ZstdSharp.dll",
+    "System.Memory.dll",
+    "System.Buffers.dll",
+    "System.Numerics.Vectors.dll",
+    "System.Runtime.CompilerServices.Unsafe.dll",
+)
+
 MOD = {
     "name": "SmoothServer",
     "src_dir": os.path.join(REPO_ROOT, "src"),
@@ -50,6 +62,15 @@ def build_one(mod, configuration):
         # DebugType is `none` in Directory.Build.props, so this normally won't exist; copy it
         # anyway if a local override produced one, for easier debugging of a local install.
         shutil.copy(pdb_path, os.path.join(stage, f"{name}.pdb"))
+
+    for dep in RUNTIME_DEPS:
+        dep_path = os.path.join(mod["src_dir"], "bin", dep)
+        if not os.path.exists(dep_path):
+            raise SystemExit(
+                f"error: {dep_path} not found — SmoothServer's Compression module needs it at "
+                f"runtime; run `dotnet build -c {configuration} src` first"
+            )
+        shutil.copy(dep_path, os.path.join(stage, dep))
 
     for fname in ("manifest.json", "README.md", "CHANGELOG.md", "icon.png"):
         src = os.path.join(mod["ts_dir"], fname)

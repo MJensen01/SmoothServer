@@ -1,27 +1,110 @@
 # SmoothServer
 
-Server-only networking tuning for Valheim dedicated servers. Drop `SmoothServer.dll` into the
-**server's** `BepInEx/plugins/SmoothServer/` — players install nothing.
+Networking and performance tuning for Valheim dedicated servers — **and, since 0.3.0, an optional
+client half in the same DLL**.
 
-## Modules (each has its own `Enabled` toggle)
+The server half is the point of the mod and it still needs **zero client installs**:
+`[General] EnforceClientMod` defaults to `false`, so vanilla players can always join. Install the
+same package on players' machines as well and you additionally get packet compression, a client
+send budget and a server-wide shared map.
 
-- **Telemetry** — periodic fps / frame-time / ZDO-rate log line. No gameplay effect.
-- **FrameRate** — raises the dedicated server's Unity frame cap (`TargetFrameRate`, default 0 =
-  leave vanilla's ~30 fps untouched). 60 is a good default on modern hardware: roughly +4pp of
-  one CPU core for half the tick latency.
-- **SendCadence** — sends ZDO updates to every connected peer on a fixed interval
-  (`SendHz`, default 20) instead of vanilla's one-peer-per-frame round robin. The win scales
-  with player count. Note: while this is enabled, BetterNetworking's own "Update Rate" setting
-  becomes inert (its Steamworks send-rate tuning is unaffected).
-- **SendBudget** — the ZDO send-queue high-water mark / minimum chunk size, exposed as config.
-- **CreateBudget** — objects created per frame, exposed as config (default matches vanilla,
-  i.e. a no-op until raised).
+## Installing
 
-Config: `Nosferatu.SmoothServer.cfg` in the server's `BepInEx/config/`.
+**Server admins** — install into the *server's* profile
+(`BepInEx/plugins/SmoothServer/`). Everything under "Server modules" below starts working
+immediately; nobody has to install anything. Config file: `Nosferatu.SmoothServer.cfg` in the
+server's `BepInEx/config/`.
+
+**Players** — install into your own profile only if the server also runs SmoothServer 0.3.0+.
+`[General] Mode` is `Auto`: a dedicated server runs the server half, your game runs the client
+half. You get compression, the client send budget and the shared map; server-owned settings are
+pushed to you by the server.
+
+**The package contains six DLLs**, not one: `SmoothServer.dll` plus `ZstdSharp.dll`,
+`System.Memory.dll`, `System.Buffers.dll`, `System.Numerics.Vectors.dll` and
+`System.Runtime.CompilerServices.Unsafe.dll` (the zstd codec and its dependencies — none ship
+with Valheim or BepInEx). A mod manager handles this; hand-installers must copy all six.
+
+## Mods this replaces — uninstall them first
+
+| Uninstall | Replaced by | Where |
+| --- | --- | --- |
+| **CW_Jesse / BetterNetworking** | `Compression` + `SteamRates` + `SendQueueGuard` | server **and** clients |
+| **Mydayyy / ServerSideMap** | `SharedMap` | server **and** clients |
+
+Both must go from *every* machine. If BetterNetworking is still installed, `Compression` refuses
+to patch (`FAILED(...)` in the module summary) and the rest of SmoothServer loads normally — it
+will not break your server, it just will not compress. SharedMap imports an existing
+`<world>.mod.serversidemap.explored` file once on first start, so no exploration is lost.
+
+## Server modules
+
+Each module has its own `Enabled` toggle in its config section.
+
+- **Telemetry** `[Telemetry]` — periodic fps / frame-time / ZDO-rate log line. No gameplay effect.
+- **FrameRate** `[FrameRate]` — raises the dedicated server's Unity frame cap. 60 is a good
+  default on modern hardware: roughly +4pp of one CPU core for half the tick latency.
+- **SendCadence** `[SendCadence]` — sends ZDO updates to every peer on a fixed interval
+  (`SendHz`, default 20) instead of vanilla's one-peer-per-frame round robin. Scales with player count.
+- **SendBudget** `[SendBudget]` — the ZDO send-queue high-water mark and minimum chunk size,
+  exposed as config (vanilla 10240 / 2048). Acts as the fallback when AdaptiveBudget is off.
+- **CreateBudget** `[CreateBudget]` — objects created per frame, exposed as config (default
+  matches vanilla, i.e. a no-op until raised).
+- **PeerTelemetry** `[PeerTelemetry]` — per-peer ping, throughput and Steam send-queue sampling.
+  No patches; feeds AdaptiveBudget.
+- **AdaptiveBudget** `[AdaptiveBudget]` — a *per-peer* send budget from each peer's measured
+  bandwidth-delay product, clamped, EMA-smoothed, and backed off while Steam's pending byte count
+  says the pipe is congested. A player on fibre next door and one on satellite no longer share
+  one number.
+- **SteamRates** `[SteamRates]` — raises Steam's `SendRateMax` (default 1 MB/s).
+  `SendRateMin` stays at vanilla on purpose: it is a floor on Steam's own bandwidth *estimate*,
+  and raising it stops the congestion controller backing off for weak connections.
+- **SendQueueGuard** `[SendQueueGuard]` — defers, never drops, while a peer's Steam send queue is
+  backed up, and survives the Steamworks throws that can occur mid-handshake.
+- **SyncListCache** `[SyncListCache]` — caches the per-peer sector scan in `ZDOMan.CreateSyncList`
+  briefly; the filter and sort still run on every send.
+- **VPOServer** `[VPOServer]` — the server-safe parts of ValheimPerformanceOptimizations (MIT):
+  `WearNTear` support caching and a faster `ReleaseNearbyZDOS` scan.
+- **AsyncSave** `[AsyncSave]` — pre-sizes the save clone list. Measured on a 136 000-ZDO world,
+  main-thread autosave stall **67 ms → 47 ms** and **78 ms → 45 ms**.
+- **GcThrottle** `[GcThrottle]` — rate-limits `Resources.UnloadUnusedAssets` on an idle server.
+- **OwnershipRelease** `[OwnershipRelease]` — shortens the ZDO ownership-release interval from
+  vanilla's 2 s (default 0.5 s) so objects change hands faster as players move.
+- **MapSelfTest** `[MapSelfTest]` — headless unit tests for the shared-map codec at load; shows up
+  as `applied  PASS` in the module summary.
+
+## What the client half adds
+
+- **Compression** `[Compression]` — *both ends*. zstd over Steam sockets using
+  BetterNetworking's trained dictionaries, with an explicit per-message frame tag and an
+  `SS_Caps`/`SS_Ready` capability handshake, so the receiver always knows whether a message is
+  compressed. Peers without the mod stay uncompressed with no penalty. Typical self-test ratio on
+  real ZDO traffic: **~8 %** of the original size.
+- **SharedMap** `[Map]` — *both ends*. The whole server shares map exploration and pins. The store
+  is bit-packed and compressed (**1.7 KB** where ServerSideMap wrote **4.2 MB** for the same
+  world), the map size is read from your client rather than hardcoded, and updates are batched at
+  1 Hz into sparse chunks instead of one RPC per explored pixel. Merging goes through vanilla
+  `Minimap.Explore`, so shared terrain bakes into your own map file and nothing is lost if the
+  module is turned off. Pin sharing is configurable per pin type; death pins are off by default.
+- **ClientNet** `[Client]` — *client only*. Your client's own ZDO send high-water mark (default
+  48 KB, vanilla 10 KB) and Steam `SendRateMax`. Inactive on a dedicated server.
+
+## Config
+
+One file, `Nosferatu.SmoothServer.cfg`. Edits are picked up live on a running server
+(`[General] HotReload`) — no restart. Settings the server owns are pushed to clients that run the
+mod (ServerSync); `[General]` entries stay machine-local.
 
 ## Dependencies
 
 - [BepInExPack_Valheim](https://valheim.thunderstore.io/package/denikson/BepInExPack_Valheim/) 5.4.2333
+
+## Credits
+
+- zstd dictionaries and the compression idea: CW_Jesse's **BetterNetworking** (MIT).
+- `VPOServer`: **ValheimPerformanceOptimizations** (MIT).
+- Config sync: blaxxun-boop's **ServerSync** (MIT-0).
+- `SharedMap` is a clean-room reimplementation inspired by Mydayyy's **ServerSideMap**.
 
 ## Source & issues
 

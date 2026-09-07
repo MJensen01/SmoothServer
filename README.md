@@ -3,30 +3,42 @@
 A BepInEx 5 mod for Valheim 0.221.12, built and maintained for a small dedicated-server group
 and released here for anyone to use. MIT licensed.
 
-Server-only networking tuning (frame rate, ZDO send cadence/budgets, telemetry). Nothing to
-install on the client.
+Networking and performance tuning for dedicated servers (frame rate, ZDO send cadence, per-peer
+adaptive budgets, async save, telemetry). Since 0.3.0 the same DLL also carries an **optional
+client half** — zstd packet compression, a client send budget and a server-wide shared map —
+but `[General] EnforceClientMod` defaults to `false`, so the server half still works with
+**nothing installed on the client** and vanilla players can always join.
+
+Replaces **BetterNetworking** and **ServerSideMap**; both must be uninstalled from the server
+and from every client (see `thunderstore/README.md`).
 
 Pre-release (see version plan below), built and tested against Valheim `0.221.12` / BepInEx
 `5.4.2333`. A 1.0-compatible build will follow once the game updates.
 
 ## Install (server owners)
 
-1. Drop `SmoothServer.dll` into `BepInEx/plugins/SmoothServer/` on the dedicated server. Depends
-   on [BepInExPack_Valheim](https://valheim.thunderstore.io/package/denikson/BepInExPack_Valheim/)
+1. Drop **all six DLLs** from the release zip (`SmoothServer.dll`, `ZstdSharp.dll`,
+   `System.Memory.dll`, `System.Buffers.dll`, `System.Numerics.Vectors.dll`,
+   `System.Runtime.CompilerServices.Unsafe.dll`) into `BepInEx/plugins/SmoothServer/` on the
+   dedicated server. Depends on
+   [BepInExPack_Valheim](https://valheim.thunderstore.io/package/denikson/BepInExPack_Valheim/)
    5.4.2333.
 2. Start the server once to generate `BepInEx/config/Nosferatu.SmoothServer.cfg`, then edit the
    values you want (see below).
-3. Players do not need to install anything — this mod is server-only.
+3. Players do not need to install anything. Installing the same package on their machines too
+   additionally enables compression, the client send budget and the shared map.
 
 ## Config overview
 
-- `Telemetry` — periodic fps/frame-time/ZDO-rate log line, no gameplay effect.
-- `FrameRate` — raise the dedicated server's Unity frame cap (default 0 = untouched, vanilla ~30).
-- `SendCadence` — send ZDO updates to every connected peer on a fixed interval instead of
-  vanilla's one-peer-per-frame round robin (bigger effect the more players are online).
-- `SendBudget`, `CreateBudget` — the ZDO send-queue high-water mark and objects-created-per-frame
-  cap, exposed as config instead of hardcoded.
-- `HotReload` — cfg edits on a running server are picked up live, no restart.
+One file, one section per module, each with its own `Enabled` toggle. Full list in
+[`thunderstore/README.md`](thunderstore/README.md).
+
+- `[General]` — `Mode` (Auto/Server/Client), `EnforceClientMod` (default false), `HotReload`.
+- Server: `Telemetry`, `FrameRate`, `SendCadence`, `SendBudget`, `CreateBudget`, `PeerTelemetry`,
+  `AdaptiveBudget`, `SteamRates`, `SendQueueGuard`, `SyncListCache`, `VPOServer`, `AsyncSave`,
+  `GcThrottle`, `OwnershipRelease`, `MapSelfTest`.
+- Both ends: `Compression`, `Map` (SharedMap). Client only: `Client` (ClientNet).
+- `HotReload` — cfg edits on a running server are picked up live, no restart, for every module.
 
 ## Credits
 

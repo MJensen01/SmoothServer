@@ -56,6 +56,9 @@ jobs:
           cp "$MANAGED"/com.rlabrecque.steamworks.net.dll lib/
           cp "$MANAGED"/UnityEngine{,.CoreModule,.PhysicsModule,.AnimationModule,.IMGUIModule,.InputLegacyModule,.UI,.UIModule,.UnityWebRequestModule}.dll lib/
           cp "$MANAGED"/Unity.TextMeshPro.dll lib/
+          # Splatform: Minimap.AddPin takes a PlatformUserID with a default value,
+          # so SharedMap cannot even call it without this on the reference path.
+          cp "$MANAGED"/Splatform.dll lib/
 
           curl -sL "https://thunderstore.io/package/download/denikson/BepInExPack_Valheim/5.4.2333/" -o bie.zip
           unzip -q bie.zip -d bie

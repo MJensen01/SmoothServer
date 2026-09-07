@@ -2,8 +2,92 @@
   <PropertyGroup>
     <AssemblyName>SmoothServer</AssemblyName>
     <RootNamespace>SmoothServer</RootNamespace>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <OutputPath>bin/</OutputPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Vendor/ServerSync.cs is written with nullable reference annotations.
+         "annotations" turns the syntax on without turning the analysis warnings on,
+         so our own code stays plain C# and the build is warning-free. -->
+    <Nullable>annotations</Nullable>
+    <!-- The repo's src/Directory.Build.props calls the game-assembly dir ValheimManagedDir;
+         the box lab's /opt/modlab/Directory.Build.props calls it ValheimManaged. The nearest
+         Directory.Build.props has already been imported by the time this runs, so this line
+         makes the same csproj build unchanged in both places. -->
+    <ValheimManagedDir Condition="'$(ValheimManagedDir)' == ''">$(ValheimManaged)</ValheimManagedDir>
+    <!-- ZstdSharp is a real runtime dependency, so its assemblies must land next to
+         SmoothServer.dll in the plugin folder (BepInEx resolves from there). The shared props
+         turn this off for reference-only game assemblies; those are all <Private>false</Private>
+         so they are unaffected. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pure-managed C# port of zstd - no native library, no P/Invoke, works under Unity's Mono.
+         Same version BetterNetworking used. We ship it as a plain DLL beside the plugin rather
+         than Costura-weaving it in (NOTES 6: the weaver silently embedded nothing when
+         CopyLocalLockFileAssemblies was false, and swept up build-time assemblies when it did). -->
+    <PackageReference Include="ZstdSharp.Port" Version="0.6.4" />
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
+
+  <!-- The box lab's /opt/modlab/Directory.Build.props references a non-existent
+       assembly_steamworks.dll and no Steamworks assembly at all, so add the real one there.
+       The repo's own src/Directory.Build.props (which sets ValheimManagedDir but not
+       ValheimManaged) already references it - hence the condition, which keeps this from
+       becoming a duplicate item in CI. -->
+  <ItemGroup Condition="'$(ValheimManaged)' != ''">
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(ValheimManagedDir)/com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+      <Publicize>true</Publicize>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Needed by Vendor/ServerSync.cs (deflate-compressed config packages, [OnDeserialized]). -->
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.Runtime.Serialization" />
+    <!-- ServerSync's version-mismatch popup writes into a TMP_Text. JetBrains' [PublicAPI] /
+         [UsedImplicitly] need no reference: Unity ships them inside UnityEngine.CoreModule. -->
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(ValheimManagedDir)/Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Minimap.AddPin's last parameter is a PlatformUserID with a default value, so calling it
+         at all needs this assembly on the reference path. Neither Directory.Build.props lists it. -->
+    <Reference Include="Splatform">
+      <HintPath>$(ValheimManagedDir)/Splatform.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- zstd dictionaries trained on real Valheim traffic by CW_Jesse for BetterNetworking,
+         reused under its MIT licence. The frame tag names which one a message used, so both are
+         always available for decompression. -->
+    <None Remove="dict/small" />
+    <None Remove="dict/big" />
+    <EmbeddedResource Include="dict/small">
+      <LogicalName>SmoothServer.dict.small</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="dict/big">
+      <LogicalName>SmoothServer.dict.big</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- CopyLocalLockFileAssemblies=true above also drags the BUILD-TIME publicizer and its
+       AsmResolver stack into bin/ (NOTES 6 saw the same thing happen to BetterNetworking's
+       Costura weave). Keep only what SmoothServer actually needs at runtime: ZstdSharp and the
+       System.Memory family it depends on under net472 - none of which ship in the game's
+       Managed dir. Everything shipped here must also be listed in scripts/package.py. -->
+  <PropertyGroup>
+    <SSRuntimeDeps>;ZstdSharp;System.Memory;System.Buffers;System.Numerics.Vectors;System.Runtime.CompilerServices.Unsafe;</SSRuntimeDeps>
+  </PropertyGroup>
+  <Target Name="TrimBuildOnlyOutputs" AfterTargets="ResolveReferences">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+                               Condition="!$(SSRuntimeDeps.Contains(';%(Filename);'))" />
+    </ItemGroup>
+  </Target>
+
 </Project>

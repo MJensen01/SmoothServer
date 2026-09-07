@@ -52,7 +52,10 @@ namespace SmoothServer
         internal static int GetHighWaterBytes()
         {
             if (!Active || !ServerActive()) return VanillaHighWater;
-            return HighWaterBytes;
+            // Per-peer override (0.3.0): AdaptiveBudget returns `configured` unchanged
+            // whenever that module is off or the peer has no telemetry yet, so this is
+            // exactly HighWaterBytes when AdaptiveBudget is not running. NOTES 17.3.
+            return AdaptiveBudgetModule.HighWaterFor(HighWaterBytes);
         }
 
         internal static int GetMinChunkBytes()
