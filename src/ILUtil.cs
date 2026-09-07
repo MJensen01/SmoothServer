@@ -4,6 +4,11 @@ using HarmonyLib;
 
 namespace SmoothServer
 {
+    /// <summary>
+    /// Small Harmony transpiler helpers shared by the modules that swap vanilla int literals for
+    /// a configurable call (SendBudget, CreateBudget, ...). Not a module itself — no side, no
+    /// config section, nothing to enable/disable.
+    /// </summary>
     internal static class ILUtil
     {
         /// <summary>True if the instruction pushes an int32 constant; yields its value.</summary>

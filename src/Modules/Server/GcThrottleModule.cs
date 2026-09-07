@@ -42,6 +42,15 @@ namespace SmoothServer
         private static int _skipped;
         private static bool _deferred;      // a sweep was refused because players were online
 
+        // StatsLog accumulator: incremented every time a sweep is actually let through.
+        private static int _statGcCount;
+
+        /// <summary>StatsLog: sweep count since the last call, then reset.</summary>
+        internal static int ConsumeGcEvents()
+        {
+            int n = _statGcCount; _statGcCount = 0; return n;
+        }
+
         public override void Configure(ConfigFile cfg)
         {
             EnabledCfg = cfg.Bind("GcThrottle", "Enabled", true,
@@ -127,6 +136,7 @@ namespace SmoothServer
 
             _deferred = false;
             _lastRun = now;
+            _statGcCount++;
             if (LogSkips)
                 SmoothServerPlugin.Log.LogInfo("[GcThrottle] allowing UnloadUnusedAssets through" +
                     (_skipped > 0 ? " (" + _skipped + " skipped since the last one)" : ""));

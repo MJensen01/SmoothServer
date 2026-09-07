@@ -114,6 +114,19 @@ namespace SmoothServer.Net
         internal static long RawOut, WireOut, RawIn, WireIn;
         internal static int FramedPeers;
 
+        /// <summary>StatsLog: whether this peer (by uid) currently has framing negotiated on.</summary>
+        internal static bool IsFramedFor(long peerUid)
+        {
+            if (!Active2) return false;
+            var net = ZNet.instance;
+            if (net == null) return false;
+            var peer = net.GetPeer(peerUid);
+            var sock = peer != null ? peer.m_socket as ZSteamSocket : null;
+            if (sock == null) return false;
+            PeerState st;
+            return States.TryGetValue(sock, out st) && st.SendFramed;
+        }
+
         // ---- lifecycle -------------------------------------------------------------------
 
         protected override void Bind()

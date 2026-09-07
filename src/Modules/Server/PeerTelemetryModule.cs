@@ -19,10 +19,18 @@ namespace SmoothServer
     ///     peer.m_forceSend.Count, peer.m_invalidSector.Count
     /// plus the global ZDOMan.m_zdosSentLastSec / m_zdosRecvLastSec.
     ///
-    /// ZSteamSocket in 0.221.12 talks to the *user* interface (SteamNetworkingSockets) even on a
-    /// dedicated server - there is no SteamGameServerNetworkingSockets call anywhere in the type.
-    /// We mirror that, and fall back to the game-server interface if the user one refuses, then
-    /// log once which one actually answered (open question 1 of SMOOTHSERVER-PHASE2 §7).
+    /// <b>Which Steam interface (corrected in 0.3.1).</b> The two builds of assembly_valheim.dll
+    /// are compiled differently: on the CLIENT, ZSteamSocket calls SteamNetworkingSockets; on the
+    /// DEDICATED SERVER it calls SteamGameServerNetworkingSockets throughout (NOTES §20). Only the
+    /// matching half of Steamworks is initialised per process, so the other one throws
+    /// "Steamworks is not initialized.". We therefore probe the build's own interface FIRST, cache
+    /// whichever answers, and log it once (open question 1 of SMOOTHSERVER-PHASE2 §7).
+    ///
+    /// Note one vanilla quirk the decompile exposes: even on the server build,
+    /// ZSteamSocket.GetConnectionQuality still calls the *client* SteamNetworkingSockets - so it
+    /// throws on a dedicated server. It is client-UI-only in vanilla, which is why nobody noticed.
+    /// We call it once, and if it throws we stop calling it instead of paying an interop
+    /// exception per peer per sample.
     ///
     /// The snapshot is static so AdaptiveBudget (and anything later) can read it without
     /// re-polling Steam.
@@ -65,6 +73,7 @@ namespace SmoothServer
         private static float _logAcc;
         private static int _steamIface;     // 0 = unknown, 1 = user, 2 = gameserver, -1 = none
         private static bool _ifaceLogged;
+        private static bool _qualityAbsent; // ZSteamSocket.GetConnectionQuality unusable on this build
 
         public override void Configure(ConfigFile cfg)
         {
@@ -179,14 +188,30 @@ namespace SmoothServer
                 var zs = sock as ZSteamSocket;
                 if (zs != null)
                 {
-                    try
+                    if (!_qualityAbsent)
                     {
-                        float ql, qr, ob, ib; int ping;
-                        zs.GetConnectionQuality(out ql, out qr, out ping, out ob, out ib);
-                        stat.QualityLocal = ql; stat.QualityRemote = qr; stat.Ping = ping;
-                        stat.OutBytesPerSec = ob; stat.InBytesPerSec = ib;
+                        try
+                        {
+                            float ql, qr, ob, ib; int ping;
+                            zs.GetConnectionQuality(out ql, out qr, out ping, out ob, out ib);
+                            stat.QualityLocal = ql; stat.QualityRemote = qr; stat.Ping = ping;
+                            stat.OutBytesPerSec = ob; stat.InBytesPerSec = ib;
+                        }
+                        catch (Exception e)
+                        {
+                            // On the dedicated-server build this is vanilla calling the client
+                            // interface (see the class comment): it will never work here, so latch
+                            // it off. Any other failure is a socket closing mid-sample - transient.
+                            if (e.Message != null && e.Message.IndexOf("not initialized",
+                                    StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                _qualityAbsent = true;
+                                SmoothServerPlugin.Log.LogInfo("[PeerTelemetry] ZSteamSocket.GetConnectionQuality " +
+                                    "is unusable on this build (" + e.Message.Trim() + ") - ping/quality come from " +
+                                    "GetConnectionRealTimeStatus instead");
+                            }
+                        }
                     }
-                    catch { /* socket closing */ }
 
                     SteamNetConnectionRealTimeStatus_t st;
                     if (TryRealTimeStatus(zs, out st))
@@ -196,7 +221,13 @@ namespace SmoothServer
                         stat.PendingUnreliable = st.m_cbPendingUnreliable;
                         stat.SentUnackedReliable = st.m_cbSentUnackedReliable;
                         stat.SendRateBytesPerSec = st.m_nSendRateBytesPerSecond;
+                        // On the server build GetConnectionQuality cannot answer, so take the same
+                        // five numbers off the real-time status instead.
                         if (stat.Ping == 0) stat.Ping = st.m_nPing;
+                        if (stat.QualityLocal == 0f) stat.QualityLocal = st.m_flConnectionQualityLocal;
+                        if (stat.QualityRemote == 0f) stat.QualityRemote = st.m_flConnectionQualityRemote;
+                        if (stat.OutBytesPerSec == 0f) stat.OutBytesPerSec = st.m_flOutBytesPerSec;
+                        if (stat.InBytesPerSec == 0f) stat.InBytesPerSec = st.m_flInBytesPerSec;
                     }
                 }
 
@@ -221,33 +252,39 @@ namespace SmoothServer
 
             if (_steamIface == -1) return false;
 
-            if (_steamIface == 0 || _steamIface == 1)
-            {
-                try
-                {
-                    if (SteamNetworkingSockets.GetConnectionRealTimeStatus(zs.m_con, ref status, 0, ref lanes) == EResult.k_EResultOK)
-                    {
-                        SetIface(1, "SteamNetworkingSockets (user interface)");
-                        return true;
-                    }
-                }
-                catch { /* not initialised on this build */ }
-            }
+            // Probe the interface this build is compiled against first: game-server on a dedicated
+            // server, user on a client. The other one throws rather than returning a bad EResult,
+            // so ordering only costs one exception at startup - but it also means we never latch
+            // on to the wrong one.
+            bool serverFirst = SmoothServerPlugin.IsServerSide;
 
-            if (_steamIface == 0 || _steamIface == 2)
-            {
-                try
-                {
-                    if (SteamGameServerNetworkingSockets.GetConnectionRealTimeStatus(zs.m_con, ref status, 0, ref lanes) == EResult.k_EResultOK)
-                    {
-                        SetIface(2, "SteamGameServerNetworkingSockets (game-server interface)");
-                        return true;
-                    }
-                }
-                catch { /* not initialised on this build */ }
-            }
+            if (_steamIface == 0 || _steamIface == (serverFirst ? 2 : 1))
+                if (Probe(serverFirst, zs, ref status, ref lanes)) return true;
+
+            if (_steamIface == 0 || _steamIface == (serverFirst ? 1 : 2))
+                if (Probe(!serverFirst, zs, ref status, ref lanes)) return true;
 
             if (_steamIface == 0) SetIface(-1, "neither interface answered GetConnectionRealTimeStatus");
+            return false;
+        }
+
+        private static bool Probe(bool gameServer, ZSteamSocket zs,
+            ref SteamNetConnectionRealTimeStatus_t status, ref SteamNetConnectionRealTimeLaneStatus_t lanes)
+        {
+            try
+            {
+                EResult r = gameServer
+                    ? SteamGameServerNetworkingSockets.GetConnectionRealTimeStatus(zs.m_con, ref status, 0, ref lanes)
+                    : SteamNetworkingSockets.GetConnectionRealTimeStatus(zs.m_con, ref status, 0, ref lanes);
+                if (r == EResult.k_EResultOK)
+                {
+                    SetIface(gameServer ? 2 : 1, gameServer
+                        ? "SteamGameServerNetworkingSockets (game-server interface)"
+                        : "SteamNetworkingSockets (user interface)");
+                    return true;
+                }
+            }
+            catch { /* that half of Steamworks is not initialised in this process */ }
             return false;
         }
 

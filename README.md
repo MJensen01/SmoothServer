@@ -10,7 +10,8 @@ but `[General] EnforceClientMod` defaults to `false`, so the server half still w
 **nothing installed on the client** and vanilla players can always join.
 
 Replaces **BetterNetworking** and **ServerSideMap**; both must be uninstalled from the server
-and from every client (see `thunderstore/README.md`).
+and from every client (see `thunderstore/README.md`). `SharedMap` imports an existing
+`<world>.mod.serversidemap.explored` file once on first start, so no exploration is lost.
 
 Pre-release (see version plan below), built and tested against Valheim `0.221.12` / BepInEx
 `5.4.2333`. A 1.0-compatible build will follow once the game updates.
@@ -30,22 +31,46 @@ Pre-release (see version plan below), built and tested against Valheim `0.221.12
 
 ## Config overview
 
-One file, one section per module, each with its own `Enabled` toggle. Full list in
+One file, one section per module, each with its own `Enabled` toggle. Full list, defaults and
+descriptions in [`docs/MODULES.md`](docs/MODULES.md); install/usage detail in
 [`thunderstore/README.md`](thunderstore/README.md).
 
-- `[General]` — `Mode` (Auto/Server/Client), `EnforceClientMod` (default false), `HotReload`.
+- `[General]` — `Mode` (Auto/Server/Client), `EnforceClientMod` (default false), `HotReload`,
+  `SteamSelfTest`.
 - Server: `Telemetry`, `FrameRate`, `SendCadence`, `SendBudget`, `CreateBudget`, `PeerTelemetry`,
   `AdaptiveBudget`, `SteamRates`, `SendQueueGuard`, `SyncListCache`, `VPOServer`, `AsyncSave`,
-  `GcThrottle`, `OwnershipRelease`, `MapSelfTest`.
+  `GcThrottle`, `OwnershipRelease`, `MapSelfTest`, `StatsLog`.
 - Both ends: `Compression`, `Map` (SharedMap). Client only: `Client` (ClientNet).
-- `HotReload` — cfg edits on a running server are picked up live, no restart, for every module.
+- `HotReload` — cfg edits on a running server are picked up live, no restart, for almost every
+  module (a handful of settings need a restart — see the Hot-reload column in
+  [`docs/MODULES.md`](docs/MODULES.md)).
+
+## Stats logging
+
+`StatsLog` (server-side, on by default) writes newline-delimited JSON to
+`<BepInEx config dir>/smoothserver/stats/`: a `stats-YYYY-MM-DD.jsonl` snapshot every
+`IntervalSec` (fps/frame time, ZDO counts, per-peer network + budget + compression state) and an
+`events-YYYY-MM-DD.jsonl` stream of joins/leaves, save stalls, GC sweeps, AdaptiveBudget backoff
+transitions, SendQueueGuard drops and config reloads. Files rotate daily and are pruned past
+`RetentionDays` (default 30). `tools/analyze.py` (stdlib-only Python) turns a few days of these
+logs into a markdown report — see [`tools/README.md`](tools/README.md).
 
 ## Credits
 
-- Networking-tuning ideas informed by [BetterNetworking](https://github.com/CW-Jesse/valheim-betternetworking)
-  (**CW_Jesse**, MIT) and by [Serverside Simulations](https://github.com/ddormer/valheim-serverside)
-  (**ddormer**, no published license — credited for the idea, not the code; SmoothServer's
-  send-cadence/budget modules are an independent implementation).
+- Config sync: [ServerSync](https://github.com/blaxxun-boop/ServerSync) (**blaxxun-boop**, MIT-0),
+  vendored as source.
+- Networking-tuning ideas and trained zstd dictionaries from
+  [BetterNetworking](https://github.com/CW-Jesse/valheim-betternetworking) (**CW_Jesse**, MIT).
+- `VPOServer` adapts patches from
+  [ValheimPerformanceOptimizations](https://github.com/ontrigger/ValheimPerformanceOptimizations)
+  (**ontrigger**, MIT).
+- Server-authoritative simulation-ownership idea from
+  [Serverside Simulations](https://github.com/ddormer/valheim-serverside) (**ddormer**, no
+  published license — credited for the idea, not the code; SmoothServer's implementation is
+  independent).
+- `SharedMap` takes its persistence-file layout and merge strategy from
+  [ServerSideMap](https://github.com/Mydayyy/Valheim-ServerSideMap) (**Mydayyy**, MIT/Unlicense);
+  no source is copied.
 - See [`THIRD_PARTY.md`](THIRD_PARTY.md) for the full list and license texts.
 
 ## Building from source
@@ -64,7 +89,11 @@ python scripts\package.py   # builds thunderstore/dist zip
 
 ## Versioning
 
-Currently `0.2.0` (renamed from `OrionNet`; adds live config reload).
+Currently `0.3.1` (renamed from `OrionNet` at 0.2.0; 0.3.0 added the optional client half,
+compression, the shared map and per-peer adaptive budgets; 0.3.1 fixed a server-build Steam
+interface bug in `SendQueueGuard`/`SteamRates`/`PeerTelemetry` and added `StatsLog` + the
+`tools/` analysis scripts). See [`thunderstore/CHANGELOG.md`](thunderstore/CHANGELOG.md) for the
+full history.
 
 Name and Thunderstore namespace are **final**: package namespace/team `Nosferatu`, package
 `SmoothServer`. Both are immutable once the first version is uploaded — see

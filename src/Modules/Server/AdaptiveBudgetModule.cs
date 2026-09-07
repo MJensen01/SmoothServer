@@ -173,6 +173,20 @@ namespace SmoothServer
 
         private static long _currentPeerUid;
 
+        /// <summary>
+        /// Read-only snapshot for StatsLog: this peer's current smoothed target and whether it
+        /// is presently backing off. False when the module is off or the peer has no samples yet.
+        /// </summary>
+        internal static bool TryGetBudget(long uid, out int target, out bool congested)
+        {
+            PeerBudget b;
+            if (Active && Budgets.TryGetValue(uid, out b) && b.Samples > 0)
+            {
+                target = b.Target; congested = b.Congested; return true;
+            }
+            target = 0; congested = false; return false;
+        }
+
         // ---- per-call application -------------------------------------------------------
 
         private static void Prefix(ZDOMan.ZDOPeer peer)

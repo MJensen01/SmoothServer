@@ -23,6 +23,15 @@ namespace SmoothServer
     /// GetConfigValue on BOTH the user and the game-server utils interface and log both, which
     /// answers open question 1 of SMOOTHSERVER-PHASE2 §7 ("do SteamNetworkingUtils and
     /// SteamGameServerNetworkingUtils share a config store?") with a measurement instead of a guess.
+    ///
+    /// <b>0.3.1 - which interface exists is a property of the build, not a choice.</b> The
+    /// dedicated-server assembly_valheim.dll is compiled against SteamGameServerNetworkingUtils
+    /// (vanilla RegisterGlobalCallbacks writes the four config values through it there, and
+    /// through SteamNetworkingUtils on the client - see NOTES §20). Only the matching half of
+    /// Steamworks is initialised in each process, so the *other* interface always throws
+    /// "Steamworks is not initialized.". That is expected, not an error: this module now tries the
+    /// build's own interface first, remembers the first refusal per interface, never retries it and
+    /// never warns about it again.
     /// </summary>
     internal sealed class SteamRatesModule : FeatureModule
     {
@@ -58,10 +67,13 @@ namespace SmoothServer
                 "converts congestion into buffering and loss. BetterNetworking couples this to " +
                 "SendRateMax; we deliberately do not.");
             _writeGameServerUtils = cfg.Bind("SteamRates", "WriteGameServerUtils", true,
-                "Write through SteamGameServerNetworkingUtils (the dedicated-server interface).");
+                "Try SteamGameServerNetworkingUtils - the interface vanilla ZSteamSocket uses on " +
+                "the dedicated-server build. Not initialised in a client process; refusing there " +
+                "is expected and is not logged as a problem.");
             _writeUserUtils = cfg.Bind("SteamRates", "WriteUserUtils", true,
-                "Also write through SteamNetworkingUtils - the interface vanilla ZSteamSocket " +
-                "itself uses, even on a dedicated server.");
+                "Try SteamNetworkingUtils - the interface vanilla ZSteamSocket uses on the client " +
+                "build. Not initialised in a dedicated-server process; refusing there is expected " +
+                "and is not logged as a problem.");
             Watch(_sendRateMax); Watch(_sendRateMin);
             Watch(_writeGameServerUtils); Watch(_writeUserUtils);
         }
@@ -145,7 +157,10 @@ namespace SmoothServer
             if (!_appliedOnce)
             {
                 _appliedOnce = true;
-                if (beforeMaxUser == beforeMaxGs && afterMaxUser == afterMaxGs && afterMaxUser != beforeMaxUser)
+                if (afterMaxUser == int.MinValue || afterMaxGs == int.MinValue)
+                    SmoothServerPlugin.Log.LogInfo("[SteamRates] only one utils interface exists in this " +
+                        "process, so the two config stores cannot be compared here");
+                else if (beforeMaxUser == beforeMaxGs && afterMaxUser == afterMaxGs && afterMaxUser != beforeMaxUser)
                     SmoothServerPlugin.Log.LogInfo("[SteamRates] the two utils interfaces track the same value on this build");
                 else if (afterMaxUser != afterMaxGs)
                     SmoothServerPlugin.Log.LogInfo("[SteamRates] the two utils interfaces have SEPARATE config stores on this build");
@@ -157,13 +172,28 @@ namespace SmoothServer
             return v == int.MinValue ? "n/a" : v.ToString();
         }
 
+        // An interface that is not initialised in this process throws on every call. Record the
+        // first refusal, say so once at Info (it is expected on the other build, not a fault),
+        // and never touch that interface again.
+        private static bool _gsAbsent;
+        private static bool _userAbsent;
+
+        private static void MarkAbsent(ref bool flag, string which)
+        {
+            if (flag) return;
+            flag = true;
+            SmoothServerPlugin.Log.LogInfo("[SteamRates] " + which + " is not initialised in this " +
+                "process (expected on the " + (SmoothServerPlugin.IsServerSide ? "dedicated-server" : "client") +
+                " build) - not using it again");
+        }
+
         private static bool Write(ESteamNetworkingConfigValue key, int value)
         {
             bool ok = false;
             GCHandle h = GCHandle.Alloc(value, GCHandleType.Pinned);
             try
             {
-                if (WriteGameServerUtils)
+                if (WriteGameServerUtils && !_gsAbsent)
                 {
                     try
                     {
@@ -171,9 +201,9 @@ namespace SmoothServer
                             ESteamNetworkingConfigScope.k_ESteamNetworkingConfig_Global, IntPtr.Zero,
                             ESteamNetworkingConfigDataType.k_ESteamNetworkingConfig_Int32, h.AddrOfPinnedObject());
                     }
-                    catch (Exception e) { SmoothServerPlugin.Log.LogWarning("[SteamRates] gameServerUtils write failed: " + e.Message); }
+                    catch { MarkAbsent(ref _gsAbsent, "SteamGameServerNetworkingUtils"); }
                 }
-                if (WriteUserUtils)
+                if (WriteUserUtils && !_userAbsent)
                 {
                     try
                     {
@@ -181,7 +211,7 @@ namespace SmoothServer
                             ESteamNetworkingConfigScope.k_ESteamNetworkingConfig_Global, IntPtr.Zero,
                             ESteamNetworkingConfigDataType.k_ESteamNetworkingConfig_Int32, h.AddrOfPinnedObject());
                     }
-                    catch (Exception e) { SmoothServerPlugin.Log.LogWarning("[SteamRates] userUtils write failed: " + e.Message); }
+                    catch { MarkAbsent(ref _userAbsent, "SteamNetworkingUtils"); }
                 }
             }
             finally { h.Free(); }
@@ -191,6 +221,8 @@ namespace SmoothServer
         /// <summary>Reads an int32 config value. Returns int.MinValue when the read is not possible.</summary>
         private static int ReadValue(bool gameServer, ESteamNetworkingConfigValue key)
         {
+            if (gameServer ? _gsAbsent : _userAbsent) return int.MinValue;
+
             IntPtr buf = Marshal.AllocHGlobal(sizeof(int));
             try
             {
@@ -211,7 +243,12 @@ namespace SmoothServer
 
                 return Marshal.ReadInt32(buf);
             }
-            catch { return int.MinValue; }
+            catch
+            {
+                if (gameServer) MarkAbsent(ref _gsAbsent, "SteamGameServerNetworkingUtils");
+                else MarkAbsent(ref _userAbsent, "SteamNetworkingUtils");
+                return int.MinValue;
+            }
             finally { Marshal.FreeHGlobal(buf); }
         }
     }

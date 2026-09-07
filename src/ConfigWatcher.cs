@@ -51,6 +51,18 @@ namespace SmoothServer
         private DateTime _lastPollUtc = DateTime.MinValue;
         private DateTime _lastKnownWriteUtc = DateTime.MinValue;
 
+        // StatsLog accumulator: one change-summary string per reload, drained by
+        // ConsumeReloadSummaries. Static because StatsLog reads it without an instance.
+        private static readonly List<string> _statReloads = new List<string>();
+
+        /// <summary>StatsLog: reload change summaries since the last call, then reset.</summary>
+        internal static List<string> ConsumeReloadSummaries()
+        {
+            var copy = new List<string>(_statReloads);
+            _statReloads.Clear();
+            return copy;
+        }
+
         public ConfigWatcher(ConfigFile cfg, ManualLogSource log, string logPrefix = "[Config]")
         {
             _cfg = cfg;
@@ -162,9 +174,11 @@ namespace SmoothServer
             _lastKnownWriteUtc = SafeGetLastWriteUtc();
 
             var changes = Diff(before);
+            string summary = changes.Count == 0 ? "no changes" : string.Join(", ", changes.ToArray());
+            _statReloads.Add(summary);
             _log.LogInfo(changes.Count == 0
                 ? _logPrefix + " reloaded: no changes"
-                : _logPrefix + " reloaded: " + string.Join(", ", changes.ToArray()));
+                : _logPrefix + " reloaded: " + summary);
         }
 
         private Dictionary<ConfigDefinition, string> Snapshot()

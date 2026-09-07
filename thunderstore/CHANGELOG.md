@@ -1,5 +1,36 @@
 # Changelog — SmoothServer
 
+## 0.3.1 (2026-09-07)
+
+**Fix: server-side Steam socket modules used the client Steam interface on dedicated servers
+(connections failed).** The two builds of `assembly_valheim.dll` are compiled differently:
+`ZSteamSocket` calls `SteamNetworkingSockets` on the client and `SteamGameServerNetworkingSockets`
+on the dedicated server, and only the matching half of Steamworks is initialised in each process.
+`SendQueueGuard` re-implemented vanilla's send drain with the client interface hard-coded, so on a
+dedicated server every send threw `Steamworks is not initialized.`, no client could finish its
+handshake, and joiners were dropped with *"Socket closed by peer"*. It no longer re-implements the
+drain at all: it wraps the vanilla one with a prefix/finalizer pair, so the game picks the
+interface its own build was compiled for. Back-off and once-per-episode logging are unchanged
+(progress is now measured through `m_totalSent` instead of the `EResult`). `PeerTelemetry` probes
+the build's own interface first and stops calling `GetConnectionQuality` where vanilla itself
+calls the wrong one, taking ping/quality/throughput off the real-time status instead. `SteamRates`
+no longer warns on the missing client interface — the first refusal per interface is noted once at
+Info and that interface is never touched again. New `[General] SteamSelfTest` (off by default,
+machine-local) logs which half of Steamworks is live and, straight out of `ZSteamSocket`'s IL,
+which interfaces this build actually calls — turn it on once after a game update to re-prove it.
+
+**StatsLog**: persistent JSONL stats + events for multi-day analysis. `[StatsLog]` (server-side,
+on by default) writes `stats-YYYY-MM-DD.jsonl` every `IntervalSec` (default 10s) — fps/frame
+time, ZDO/scene counts, per-peer RTT/pending/in-flight/queued bytes, AdaptiveBudget target +
+congestion, Compression framing state, and compression byte deltas — plus `events-YYYY-MM-DD.jsonl`
+for player join/leave, world-save stalls, GC sweeps, AdaptiveBudget backoff transitions,
+SendQueueGuard drops and config reloads, as they happen. Files land in
+`BepInEx/config/smoothserver/stats/` by default, flush on every write, rotate daily (UTC) and are
+pruned past `RetentionDays` (default 30). `IntervalSec`/`RetentionDays` hot-reload. A companion
+`tools/analyze.py` (stdlib-only) turns a few days of logs into a markdown report — sessions,
+frame-time percentiles, per-player RTT/pending-bytes, AdaptiveBudget backoff time, compression
+ratio, save stalls, ZDO growth, and the worst 10-second windows.
+
 ## 0.3.0 (2026-09-07)
 
 **SmoothServer is now a both-ends mod.** The same `SmoothServer.dll` runs on a dedicated server

@@ -1,0 +1,10 @@
+[Unit]
+Description=SmoothServer host stats collector (docker stats + load/mem snapshot, one-shot)
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/modlab/stats/collect-host.sh
+User=nosferatu
+Group=nosferatu

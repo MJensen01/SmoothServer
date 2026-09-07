@@ -55,6 +55,10 @@ namespace SmoothServer
         private static int _lastZdoCount;
         private static double _lastStallMs = -1.0;
 
+        // StatsLog accumulators: fed by SaveWorldPostfix, drained by ConsumeSaveStats.
+        private static int _statSaveCount;
+        private static double _statMaxStallMs;
+
         // self test
         private static float _selfTestAt = -1f;
         private static int _selfTestPhase;          // 0 idle, 1 waiting to fire A, 2 waiting for A, 3 waiting to fire B, 4 waiting for B
@@ -150,6 +154,8 @@ namespace SmoothServer
             if (!Active) return;
             MainThreadWatch.Stop();
             _lastStallMs = MainThreadWatch.Elapsed.TotalMilliseconds;
+            _statSaveCount++;
+            if (_lastStallMs > _statMaxStallMs) _statMaxStallMs = _lastStallMs;
             if (LogStalls)
                 SmoothServerPlugin.Log.LogInfo(string.Format(
                     "[AsyncSave] world save: main-thread stall {0:F1}ms for {1} ZDOs (preSizeClone={2}); " +
@@ -198,6 +204,13 @@ namespace SmoothServer
 
             __result = list;
             return false;
+        }
+
+        /// <summary>StatsLog: save-event count and max stall since the last call, then reset.</summary>
+        internal static void ConsumeSaveStats(out int count, out double maxStallMs)
+        {
+            count = _statSaveCount; maxStallMs = _statMaxStallMs;
+            _statSaveCount = 0; _statMaxStallMs = 0.0;
         }
 
         // ---- headless self test -------------------------------------------------------------

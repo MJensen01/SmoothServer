@@ -47,7 +47,8 @@ Each module has its own `Enabled` toggle in its config section.
 - **SendCadence** `[SendCadence]` — sends ZDO updates to every peer on a fixed interval
   (`SendHz`, default 20) instead of vanilla's one-peer-per-frame round robin. Scales with player count.
 - **SendBudget** `[SendBudget]` — the ZDO send-queue high-water mark and minimum chunk size,
-  exposed as config (vanilla 10240 / 2048). Acts as the fallback when AdaptiveBudget is off.
+  exposed as config: `HighWaterBytes` defaults to 65536 (vanilla 10240), `MinChunkBytes` to 2048
+  (same as vanilla). Acts as the fallback when AdaptiveBudget is off.
 - **CreateBudget** `[CreateBudget]` — objects created per frame, exposed as config (default
   matches vanilla, i.e. a no-op until raised).
 - **PeerTelemetry** `[PeerTelemetry]` — per-peer ping, throughput and Steam send-queue sampling.
@@ -72,6 +73,13 @@ Each module has its own `Enabled` toggle in its config section.
   vanilla's 2 s (default 0.5 s) so objects change hands faster as players move.
 - **MapSelfTest** `[MapSelfTest]` — headless unit tests for the shared-map codec at load; shows up
   as `applied  PASS` in the module summary.
+- **StatsLog** `[StatsLog]` — writes `stats-YYYY-MM-DD.jsonl` (fps/frame time, ZDO counts,
+  per-peer network/budget/compression state) every `IntervalSec` (default 10s) and
+  `events-YYYY-MM-DD.jsonl` (joins/leaves, save stalls, GC sweeps, AdaptiveBudget backoff
+  transitions, SendQueueGuard drops, config reloads) as they happen, to
+  `BepInEx/config/smoothserver/stats/` by default. Rotates daily, prunes past `RetentionDays`
+  (default 30). Run `tools/analyze.py` against a few days of these files for a markdown report —
+  see the repo's `tools/README.md`.
 
 ## What the client half adds
 
@@ -102,9 +110,12 @@ mod (ServerSync); `[General]` entries stay machine-local.
 ## Credits
 
 - zstd dictionaries and the compression idea: CW_Jesse's **BetterNetworking** (MIT).
-- `VPOServer`: **ValheimPerformanceOptimizations** (MIT).
+- `VPOServer`: **ValheimPerformanceOptimizations** (ontrigger, MIT).
 - Config sync: blaxxun-boop's **ServerSync** (MIT-0).
-- `SharedMap` is a clean-room reimplementation inspired by Mydayyy's **ServerSideMap**.
+- `SharedMap` is a clean-room reimplementation inspired by Mydayyy's **ServerSideMap**
+  (MIT/Unlicense).
+- Server-authoritative ownership idea: ddormer's **Serverside Simulations** (no published
+  license — idea only, no code taken).
 
 ## Source & issues
 

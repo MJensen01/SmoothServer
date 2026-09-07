@@ -23,6 +23,7 @@ namespace SmoothServer
             AsyncSaveModule.Tick(dt);
             SteamRatesModule.Tick(dt);
             SyncListCacheModule.TickStats(dt);
+            StatsLogModule.Tick(dt);
         }
     }
 }

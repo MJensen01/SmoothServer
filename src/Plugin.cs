@@ -28,7 +28,7 @@ namespace SmoothServer
     {
         public const string PluginGuid = "Nosferatu.SmoothServer";
         public const string PluginName = "SmoothServer";
-        public const string PluginVersion = "0.3.0";
+        public const string PluginVersion = "0.3.1";
 
         internal static ManualLogSource Log;
         internal static ConfigFile Cfg;
@@ -39,6 +39,7 @@ namespace SmoothServer
         internal static ConfigEntry<RunMode> ModeCfg;
         internal static ConfigEntry<bool> EnforceClientMod;
         internal static ConfigEntry<bool> HotReloadCfg;
+        internal static ConfigEntry<bool> SteamSelfTestCfg;
 
         /// <summary>The half of the mod this process is running.</summary>
         internal static ModuleSide RunningSide = ModuleSide.Server;
@@ -67,6 +68,14 @@ namespace SmoothServer
             ModeCfg = BindLocal("General", "Mode", RunMode.Auto,
                 "Which half of the mod to run. Auto = a dedicated server (-batchmode) runs the " +
                 "server half, everything else runs the client half. Machine-local, never synced.",
+                null);
+
+            SteamSelfTestCfg = BindLocal("General", "SteamSelfTest", false,
+                "Diagnostic, off by default: at load, log which half of Steamworks is initialised " +
+                "in this process (SteamGameServer* vs Steam*) and which interfaces this build of " +
+                "ZSteamSocket actually calls, read straight out of its IL. The client and " +
+                "dedicated-server builds of assembly_valheim.dll differ here, which is what broke " +
+                "0.3.0 - turn this on once after a game update to re-prove it. Machine-local.",
                 null);
 
             HotReloadCfg = BindLocal("General", "HotReload", true,
@@ -100,6 +109,12 @@ namespace SmoothServer
             Log.LogInfo(PluginName + " " + PluginVersion + ": mode=" + ModeCfg.Value +
                         " -> running the " + (IsServerSide ? "SERVER" : "CLIENT") + " half" +
                         " (isBatchMode=" + Application.isBatchMode + ")");
+
+            if (SteamSelfTestCfg.Value)
+            {
+                try { SteamSelfTest.Run(); }
+                catch (Exception e) { Log.LogWarning("[SteamSelfTest] failed: " + e); }
+            }
 
             BetterNetworkingPresent = DetectBetterNetworking();
             if (BetterNetworkingPresent)
