@@ -13,8 +13,8 @@ Replaces **BetterNetworking** and **ServerSideMap**; both must be uninstalled fr
 and from every client (see `thunderstore/README.md`). `SharedMap` imports an existing
 `<world>.mod.serversidemap.explored` file once on first start, so no exploration is lost.
 
-Pre-release (see version plan below), built and tested against Valheim `0.221.12` / BepInEx
-`5.4.2333`. A 1.0-compatible build will follow once the game updates.
+0.5.0 is built and tested against Valheim `1.0.7` (network version 39) / BepInEx `5.4.2350`.
+For servers held on the `default_pre1_0` branch (0.221.12) use 0.4.0.
 
 ## Install (server owners)
 
@@ -23,7 +23,7 @@ Pre-release (see version plan below), built and tested against Valheim `0.221.12
    `System.Runtime.CompilerServices.Unsafe.dll`) into `BepInEx/plugins/SmoothServer/` on the
    dedicated server. Depends on
    [BepInExPack_Valheim](https://valheim.thunderstore.io/package/denikson/BepInExPack_Valheim/)
-   5.4.2333.
+   5.4.2350.
 2. Start the server once to generate `BepInEx/config/Nosferatu.SmoothServer.cfg`, then edit the
    values you want (see below).
 3. Players do not need to install anything. Installing the same package on their machines too

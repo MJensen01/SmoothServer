@@ -357,9 +357,12 @@ namespace SmoothServer
                     var owner = GetOrCacheOwner(collider);
                     if (owner == null)
                     {
+                        // 1.0 only marks the ZDO dirty when the value actually changed:
+                        //   bool num5 = !m_support.Equals(maxSupport); ... if (num5) { Set(...) }
+                        bool changed = !__instance.m_support.Equals(maxSupport);
                         __instance.m_support = maxSupport;
                         __instance.ClearCachedSupport();
-                        __instance.m_nview.GetZDO().Set(ZDOVars.s_support, __instance.m_support);
+                        if (changed) __instance.m_nview.GetZDO().Set(ZDOVars.s_support, __instance.m_support);
                         return false;
                     }
                     if (!owner.m_supports) continue;
@@ -393,8 +396,10 @@ namespace SmoothServer
 
             if (onTerrain)
             {
+                // 1.0: bool num9 = !m_support.Equals(maxSupport); m_support = maxSupport; if (num9) Set(...)
+                bool changed = !__instance.m_support.Equals(maxSupport);
                 __instance.m_support = maxSupport;
-                __instance.m_nview.GetZDO().Set(ZDOVars.s_support, __instance.m_support);
+                if (changed) __instance.m_nview.GetZDO().Set(ZDOVars.s_support, __instance.m_support);
                 return false;
             }
 
@@ -416,8 +421,12 @@ namespace SmoothServer
                 }
             }
 
+            // 1.0: float support3 = m_support; m_support = Mathf.Min(num3, maxSupport);
+            //      if (!m_support.Equals(support3)) Set(...)
+            float supportBefore = __instance.m_support;
             __instance.m_support = Mathf.Min(bestSupport, maxSupport);
-            __instance.m_nview.GetZDO().Set(ZDOVars.s_support, __instance.m_support);
+            if (!__instance.m_support.Equals(supportBefore))
+                __instance.m_nview.GetZDO().Set(ZDOVars.s_support, __instance.m_support);
             if (!__instance.HaveSupport()) __instance.ClearCachedSupport();
             return false;
         }
@@ -453,12 +462,20 @@ namespace SmoothServer
         {
             if (!Active || !ReleaseScanSpeedup || !ServerActive()) return true;
 
-            Vector2i zone = ZoneSystem.GetZone(refPosition);
+            Vector2s zone = ZoneSystem.GetZone(refPosition);
+
+            // 1.0: the near ring is per-peer and the far ring is explicitly zeroed for this scan -
+            // ZDOMan.ReleaseNearbyZDOS builds
+            //   new SimulationDistance(synced.NearSimulationDistance, 0, synced.IsClassic)
+            // and passes that to FindSectorObjects. Mirror it exactly.
+            SimulationDistance synced = ZNet.instance.GetSyncedSimulationDistance();
+            SimulationDistance nearOnly = new SimulationDistance(
+                synced.NearSimulationDistance, 0, synced.IsClassic);
+
             List<ZDO> nearby = __instance.m_tempNearObjects;
             nearby.Clear();
-            __instance.FindSectorObjects(zone, ZoneSystem.instance.m_activeArea, 0, nearby);
+            __instance.FindSectorObjects(zone, nearOnly, nearby);
 
-            int activatedArea = ZoneSystem.instance.m_activeArea - 1;
             bool isServerPass = uid == ZDOMan.GetSessionID();
 
             for (int i = 0; i < nearby.Count; i++)
@@ -466,7 +483,9 @@ namespace SmoothServer
                 var zdo = nearby[i];
                 if (zdo == null || !zdo.Persistent) continue;
 
-                Vector2i sector = zdo.GetSector();
+                // 1.0's active-area test is a point/distance test (ZNetScene.PointInsideActiveArea),
+                // no longer a sector box, so the ZDO's world position is what has to go in.
+                Vector3 position = zdo.GetPosition();
                 bool hasOwner = zdo.HasOwner();
 
                 long owner;
@@ -484,12 +503,12 @@ namespace SmoothServer
 
                 if (ownedByPassPeer)
                 {
-                    if (!ZNetScene.InActiveArea(sector, zone, activatedArea)) zdo.SetOwner(0L);
+                    if (!ZNetScene.InActiveArea(position, zone)) zdo.SetOwner(0L);
                     continue;
                 }
 
-                if ((!hasOwner || !__instance.IsInPeerActiveArea(sector, owner)) &&
-                    ZNetScene.InActiveArea(sector, zone, activatedArea))
+                if ((!hasOwner || !__instance.IsInPeerActiveArea(position, owner)) &&
+                    ZNetScene.InActiveArea(position, zone))
                     zdo.SetOwner(uid);
             }
 

@@ -1,5 +1,18 @@
 # Changelog — SmoothServer
 
+## 0.5.0 (2026-09-09) — Valheim 1.0
+
+**Rebuilt for Valheim 1.0.7 (network version 39).** Requires BepInExPack_Valheim 5.4.2350. Not compatible
+with 0.221.x — stay on 0.4.0 if your server is held on the `default_pre1_0` branch.
+
+* `VPOServer`, `SyncListCache`: ported to 1.0's per-peer `SimulationDistance` and `Vector2s` zones; the
+  WearNTear port mirrors 1.0's dirty-check so `s_support` is only broadcast when it actually changed; the
+  ownership scan uses 1.0's point-distance active-area test.
+* `AsyncSave`: the pre-size optimisation is retired — 1.0 saves per chunk and pre-sizes itself. The module
+  now instruments only (StatsLog still gets save timings) and says so loudly at boot.
+* `MapSelfTest`: worlds path via `SaveSystem.GetWorldsSaveRootPath`.
+* All three transpiler assertions hold at their original counts on 1.0; every patch target re-verified.
+
 ## 0.4.0 (2026-09-07)
 
 **`[Profiles] Profile` — one setting that tunes the whole mod.** A synced enum

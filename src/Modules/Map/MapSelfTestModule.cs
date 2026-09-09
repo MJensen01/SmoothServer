@@ -100,7 +100,9 @@ namespace SmoothServer.Map
                 string ssm = null;
                 try
                 {
-                    var dir = World.GetWorldSavePath(FileHelpers.FileSource.Local);
+                    // 1.0 moved the worlds root off World: SaveSystem.GetWorldsSaveRootPath(FileSource)
+                    // is the literal body of the old World.GetWorldSavePath.
+                    var dir = SaveSystem.GetWorldsSaveRootPath(FileHelpers.FileSource.Local);
                     if (Directory.Exists(dir))
                     {
                         var hits = Directory.GetFiles(dir, "*.mod.serversidemap.explored");

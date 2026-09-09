@@ -10,7 +10,7 @@ namespace SmoothServer
     /// M5 - sync-list cache. This module exists to pay back debt SmoothServer 0.2.0 created.
     ///
     /// Vanilla ZDOMan.CreateSyncList (server branch) does, per peer, per send:
-    ///     FindSectorObjects(zone, m_activeArea, m_activeDistantArea, sectorObjects, distantObjects)
+    ///     FindSectorObjects(zone, peer.m_peer.m_simulationDistance, sectorObjects, distantObjects)
     ///     -> filter by peer.ShouldSend -> ServerSortSendZDOS (a full List.Sort)
     ///     -> if toSync.Count &lt; 10, also filter the distant list
     ///     -> AddForceSendZdos
@@ -41,7 +41,10 @@ namespace SmoothServer
 
         private sealed class Entry
         {
-            public Vector2i Zone;
+            public Vector2s Zone;
+            // 1.0: the scan radius is now per-peer (ZNetPeer.m_simulationDistance), not the global
+            // ZoneSystem.m_activeArea, so it has to be part of the cache key.
+            public SimulationDistance Dist;
             public float StampedAt;
             public readonly List<ZDO> Sector = new List<ZDO>();
             public readonly List<ZDO> Distant = new List<ZDO>();
@@ -81,8 +84,18 @@ namespace SmoothServer
                 throw new Exception("SmoothServer SyncListCache: ZDOMan.ServerSortSendZDOS not found");
             if (AccessTools.Method(typeof(ZDOMan), "AddForceSendZdos") == null)
                 throw new Exception("SmoothServer SyncListCache: ZDOMan.AddForceSendZdos not found");
-            if (AccessTools.Method(typeof(ZDOMan), "FindSectorObjects") == null)
+            var find = AccessTools.Method(typeof(ZDOMan), "FindSectorObjects");
+            if (find == null)
                 throw new Exception("SmoothServer SyncListCache: ZDOMan.FindSectorObjects not found");
+            // 1.0 shape: FindSectorObjects(Vector2s, SimulationDistance, List<ZDO>, List<ZDO> = null)
+            var fp = find.GetParameters();
+            if (fp.Length != 4 || fp[0].ParameterType != typeof(Vector2s) ||
+                fp[1].ParameterType != typeof(SimulationDistance) ||
+                fp[2].ParameterType != typeof(List<ZDO>) || fp[3].ParameterType != typeof(List<ZDO>))
+                throw new Exception("SmoothServer SyncListCache: ZDOMan.FindSectorObjects signature changed " +
+                                    "(expected (Vector2s, SimulationDistance, List<ZDO>, List<ZDO>)) - refusing to patch");
+            if (AccessTools.Field(typeof(ZNetPeer), "m_simulationDistance") == null)
+                throw new Exception("SmoothServer SyncListCache: ZNetPeer.m_simulationDistance not found - refusing to patch");
 
             Harmony.Patch(target,
                 prefix: new HarmonyMethod(typeof(SyncListCacheModule), nameof(Prefix)) { priority = Priority.High });
@@ -123,7 +136,8 @@ namespace SmoothServer
             if (peer == null || peer.m_peer == null) return true;
 
             Vector3 refPos = peer.m_peer.GetRefPos();
-            Vector2i zone = ZoneSystem.GetZone(refPos);
+            Vector2s zone = ZoneSystem.GetZone(refPos);
+            SimulationDistance dist = peer.m_peer.m_simulationDistance;
             long uid = peer.m_peer.m_uid;
             float now = Time.realtimeSinceStartup;
 
@@ -137,7 +151,8 @@ namespace SmoothServer
 
             bool fresh = CacheSec > 0f && e.StampedAt > 0f &&
                          now - e.StampedAt < CacheSec &&
-                         e.Zone.x == zone.x && e.Zone.y == zone.y;
+                         e.Zone.x == zone.x && e.Zone.y == zone.y &&
+                         e.Dist.Equals(dist);
 
             if (fresh)
             {
@@ -148,9 +163,9 @@ namespace SmoothServer
                 _misses++;
                 e.Sector.Clear();
                 e.Distant.Clear();
-                __instance.FindSectorObjects(zone, ZoneSystem.instance.m_activeArea,
-                    ZoneSystem.instance.m_activeDistantArea, e.Sector, e.Distant);
+                __instance.FindSectorObjects(zone, dist, e.Sector, e.Distant);
                 e.Zone = zone;
+                e.Dist = dist;
                 e.StampedAt = now;
             }
 

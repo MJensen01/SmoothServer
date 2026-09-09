@@ -91,35 +91,57 @@ namespace SmoothServer
 
             var saveWorld = AccessTools.Method(typeof(ZNet), "SaveWorld", new[] { typeof(bool) });
             var saveThread = AccessTools.Method(typeof(ZNet), "SaveWorldThread");
-            var getSaveClone = AccessTools.Method(typeof(ZDOMan), "GetSaveClone");
 
             if (saveWorld == null)
                 throw new Exception("SmoothServer AsyncSave: ZNet.SaveWorld(bool) not found");
             if (saveThread == null)
                 throw new Exception("SmoothServer AsyncSave: ZNet.SaveWorldThread not found - " +
                                     "vanilla's background save thread is gone, re-check the design");
-            if (getSaveClone == null || getSaveClone.ReturnType != typeof(List<ZDO>))
-                throw new Exception("SmoothServer AsyncSave: ZDOMan.GetSaveClone() -> List<ZDO> not found");
-            if (AccessTools.Field(typeof(ZDOMan), "m_objectsBySector") == null ||
-                AccessTools.Field(typeof(ZDOMan), "m_objectsByOutsideSector") == null ||
-                AccessTools.Field(typeof(ZDOMan), "m_objectsByID") == null)
-                throw new Exception("SmoothServer AsyncSave: ZDOMan sector/ID collections not found");
+            if (AccessTools.Field(typeof(ZDOMan), "m_objectsByID") == null)
+                throw new Exception("SmoothServer AsyncSave: ZDOMan.m_objectsByID not found");
+
+            // ---- the pre-size optimisation is retired on Valheim 1.0 ------------------------
+            // 1.0 replaced ZDOMan.GetSaveClone() -> List<ZDO> (the un-sized MemberwiseClone walk
+            // this module pre-sized) with the chunked save:
+            //     PrepareSave() { m_saveData.m_objectsByChunk = GetSaveClonePerChunk(); ... }
+            // GetSaveClonePerChunk counts ZDOs per chunk first and allocates each chunk list at
+            // that count, so vanilla now does the pre-sizing itself. m_objectsByOutsideSector is
+            // gone too. There is nothing left to optimise here and no safe way to fake it, so the
+            // optimisation half of this module is OFF and says so; the measurement half (which is
+            // what StatsLog consumes) still works and is what stays patched.
+            bool cloneApiGone = AccessTools.Method(typeof(ZDOMan), "GetSaveClone") == null;
+            if (cloneApiGone)
+            {
+                if (PreSizeClone)
+                    Log.LogWarning("[AsyncSave] PreSizeClone DISABLED on this game build: " +
+                                   "ZDOMan.GetSaveClone() no longer exists - 1.0 saves per chunk via " +
+                                   "GetSaveClonePerChunk(), which pre-sizes each chunk list itself. " +
+                                   "No patch applied for it. Measurement only.");
+                PreSizeClone = false;
+            }
 
             Harmony.Patch(saveWorld,
                 prefix: new HarmonyMethod(typeof(AsyncSaveModule), nameof(SaveWorldPrefix)) { priority = Priority.First },
                 postfix: new HarmonyMethod(typeof(AsyncSaveModule), nameof(SaveWorldPostfix)) { priority = Priority.Last });
             Harmony.Patch(saveThread,
                 postfix: new HarmonyMethod(typeof(AsyncSaveModule), nameof(SaveWorldThreadPostfix)));
-            Harmony.Patch(getSaveClone,
-                prefix: new HarmonyMethod(typeof(AsyncSaveModule), nameof(GetSaveClonePrefix)) { priority = Priority.High });
 
             _selfTestAt = _selfTestSeconds.Value;
+            // The self test exists only to measure PreSizeClone off vs on. With no optimisation to
+            // toggle it would force two pointless world saves and print a meaningless 0ms delta.
+            if (_selfTestAt > 0f && cloneApiGone)
+            {
+                Log.LogWarning("[AsyncSave] SelfTestSeconds ignored: it measures PreSizeClone off vs on " +
+                               "and PreSizeClone has nothing to do on this game build.");
+                _selfTestAt = 0f;
+            }
             _selfTestPhase = _selfTestAt > 0f ? 1 : 0;
             _selfTestTimer = 0f;
 
             Active = true;
             Log.LogInfo("[AsyncSave] vanilla already writes the world on ZNet.SaveWorldThread; " +
-                        "instrumenting the MAIN-THREAD half (PrepareSave). preSizeClone=" + PreSizeClone +
+                        "instrumenting the MAIN-THREAD half (PrepareSave). preSizeClone=" +
+                        (cloneApiGone ? "n/a (vanilla pre-sizes per chunk)" : PreSizeClone.ToString()) +
                         " logStalls=" + LogStalls +
                         (_selfTestAt > 0f ? " selfTest=in " + _selfTestAt.ToString("F0") + "s" : ""));
         }
@@ -173,38 +195,12 @@ namespace SmoothServer
                     ThreadWatch.Elapsed.TotalMilliseconds));
         }
 
-        // ---- the one optimisation ---------------------------------------------------------
-
-        private static bool GetSaveClonePrefix(ZDOMan __instance, ref List<ZDO> __result)
-        {
-            if (!Active || !PreSizeClone) return true;
-
-            var list = new List<ZDO>(__instance.m_objectsByID.Count + 64);
-
-            var bySector = __instance.m_objectsBySector;
-            for (int i = 0; i < bySector.Length; i++)
-            {
-                var bucket = bySector[i];
-                if (bucket == null) continue;
-                for (int j = 0; j < bucket.Count; j++)
-                {
-                    var zdo = bucket[j];
-                    if (zdo.Persistent) list.Add(zdo.Clone());
-                }
-            }
-
-            foreach (var bucket in __instance.m_objectsByOutsideSector.Values)
-            {
-                for (int j = 0; j < bucket.Count; j++)
-                {
-                    var zdo = bucket[j];
-                    if (zdo.Persistent) list.Add(zdo.Clone());
-                }
-            }
-
-            __result = list;
-            return false;
-        }
+        // ---- the one optimisation (retired on 1.0, see ApplyPatches) -----------------------
+        // GetSaveClonePrefix used to replace ZDOMan.GetSaveClone() with a pre-sized clone walk over
+        // m_objectsBySector + m_objectsByOutsideSector. Valheim 1.0 removed both the method and
+        // m_objectsByOutsideSector (ZDOMan now keeps only `private List<ZDO>[] m_objectsBySector`
+        // indexed by ZoneSystem.SectorIndex.Sector, and PrepareSave calls GetSaveClonePerChunk()).
+        // The patch is not installed; nothing here is a silent no-op.
 
         /// <summary>StatsLog: save-event count and max stall since the last call, then reset.</summary>
         internal static void ConsumeSaveStats(out int count, out double maxStallMs)

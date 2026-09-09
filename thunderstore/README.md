@@ -105,7 +105,7 @@ mod (ServerSync); `[General]` entries stay machine-local.
 
 ## Dependencies
 
-- [BepInExPack_Valheim](https://valheim.thunderstore.io/package/denikson/BepInExPack_Valheim/) 5.4.2333
+- [BepInExPack_Valheim](https://valheim.thunderstore.io/package/denikson/BepInExPack_Valheim/) 5.4.2350
 
 ## Credits
 
