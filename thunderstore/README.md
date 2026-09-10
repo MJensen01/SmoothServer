@@ -1,5 +1,11 @@
 # SmoothServer
 
+> **Actively maintained for Valheim 1.0.** Rebuilt for 1.0.7 on launch day and kept current as patches land;
+> version 1.x of the mod is in the works. Bugs and ideas: [GitHub issues](https://github.com/MJensen01/SmoothServer/issues).
+>
+> Designed and thought up by **Nosferatu** from real pain points hit running a co-op server.
+> Coded using Claude, tested by humans.
+
 Networking and performance tuning for Valheim dedicated servers — **and, since 0.3.0, an optional
 client half in the same DLL**.
 
