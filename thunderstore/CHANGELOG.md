@@ -16,6 +16,9 @@ uncompressed.
   `[Compression] <peer> compression disabled (reason) - running plain` line per side.
 * Wire proto bumped to 2: a 0.5.0 peer (proto 1) is never framed, in either direction - it logs one info
   line and stays uncompressed. Servers whose clients have no mod negotiate nothing, exactly as before.
+* The client could send its capabilities before the server had assigned it a peer id, so the offer was
+  dropped and never retried — compression silently never negotiated. The offer now waits for the peer to be
+  ready, and both sides log the handshake.
 * New machine-local `[Compression] SelfTest` (default off): runs the two-peer handshake through an
   in-process simulation at load and logs a PASS/FAIL line per case.
 

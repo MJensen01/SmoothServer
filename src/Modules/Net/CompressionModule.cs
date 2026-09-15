@@ -120,7 +120,10 @@ namespace SmoothServer.Net
             public bool Poisoned;
             public int TheirProto;
             public int TheirDictHash;
+            /// <summary>The peer's ZNet uid. 0 until ZNet.RPC_PeerInfo lands - see OfferCapsForPeer.</summary>
             public long PeerId;
+            /// <summary>Host name of the peer, for the handshake log lines.</summary>
+            public string Who;
             // byte[] instances we have already framed and left in m_sendQueue. Reference
             // identity (byte[] does not override Equals), so a failed send cannot double-frame.
             public readonly HashSet<byte[]> Framed = new HashSet<byte[]>();
@@ -333,7 +336,9 @@ namespace SmoothServer.Net
         // things issue #1 turned on can be checked without two running game clients:
         //   1. plain packets arriving between SS_Caps and SS_Ready must not be unframed,
         //   2. one bad frame must disable compression on BOTH ends,
-        //   3. a peer on another wire proto must stay plain.
+        //   3. a peer on another wire proto must stay plain,
+        // plus the one issue #2 turned on:
+        //   4. the client must not spend its one offer before the peer has a uid.
 
         private sealed class SimMsg
         {
@@ -351,9 +356,14 @@ namespace SmoothServer.Net
             public readonly Queue<SimMsg> Inbox = new Queue<SimMsg>();
         }
 
+        /// <summary>A stand-in ZNet uid: non-zero means "ZNet.RPC_PeerInfo has completed".</summary>
+        private const long SimPeerId = 0x5111L;
+
         private static void SimWire(SimPeer from, SimPeer to)
         {
             from.PeerName = to.Name;
+            from.St.Who = to.Name;
+            from.St.PeerId = SimPeerId;   // ready by default; Case4 walks the not-ready window
             from.St.SendRpc = (rpc, args) => to.Inbox.Enqueue(new SimMsg { Rpc = rpc, Args = args });
             from.St.ProtectQueue = () => { };   // no real send queue in the simulation
             from.St.RestoreQueue = () => { };
@@ -413,6 +423,7 @@ namespace SmoothServer.Net
                 Case1Ordering();
                 Case2TwoSidedDisable();
                 Case3ProtoMismatch();
+                Case4PeerNotReady();
             }
             catch (Exception e)
             {
@@ -518,6 +529,41 @@ namespace SmoothServer.Net
             SimSend(s, c, SimPayload(7, 900));      // still plain, still readable
             SimPump(c, errs);
             SimResult("proto mismatch", errs);
+        }
+
+        /// <summary>
+        /// Issue #2: the client offered its caps on the first tick after the socket connected,
+        /// which is inside the window where ZNet.RPC_PeerInfo has not yet given the peer a uid.
+        /// A routed RPC to uid 0 is a broadcast, RouteRPC forwards a broadcast only to ready
+        /// peers, so the offer reached nobody - and SentCaps latched, so it was never retried and
+        /// compression silently never negotiated. Nothing may go out before the peer is ready,
+        /// and the offer must still happen (exactly once) when it becomes ready.
+        /// </summary>
+        private static void Case4PeerNotReady()
+        {
+            var errs = new List<string>();
+            var c = new SimPeer { Name = "sim-client", St = new PeerState() };
+            var s = new SimPeer { Name = "sim-server", St = new PeerState() };
+            SimWire(c, s); SimWire(s, c);
+
+            c.St.PeerId = 0L;                       // ZNetPeer.IsReady() == false
+            OfferCapsForPeer(c.St, 0L);             // the two ticks that used to burn the offer
+            OfferCapsForPeer(c.St, 0L);
+            SimCheck(errs, !c.St.SentCaps, "client offered caps before the peer was ready");
+            SimCheck(errs, s.Inbox.Count == 0, "an offer went out while the peer id was 0");
+
+            OfferCapsForPeer(c.St, SimPeerId);      // PeerInfo landed: uid assigned, peer routed
+            SimCheck(errs, c.St.SentCaps, "client did not offer caps once the peer was ready");
+
+            SimPump(s, errs); SimPump(c, errs); SimPump(s, errs);
+            SimCheck(errs, c.St.SendFramed && c.St.RecvFramed && s.St.SendFramed && s.St.RecvFramed,
+                     "handshake did not complete after the peer became ready");
+
+            OfferCapsForPeer(c.St, SimPeerId);      // later ticks must not re-offer
+            int caps = 0;
+            foreach (var m in s.Inbox) if (m.Rpc == RpcCaps) caps++;
+            SimCheck(errs, caps == 0, "client re-offered caps after the handshake");
+            SimResult("peer readiness", errs);
         }
 
         internal static byte[] Compress(byte[] raw, byte tag)
@@ -740,6 +786,7 @@ namespace SmoothServer.Net
         {
             var st = Get(sock, true);
             st.PeerId = peerId;
+            if (st.Who == null) st.Who = sock.GetHostName();
             if (st.SendRpc == null)
             {
                 var s = sock;
@@ -765,12 +812,35 @@ namespace SmoothServer.Net
         private static void SendCapsOnce(PeerState st)
         {
             if (st.SentCaps) return;
+            // Issue #2. ZRoutedRpc reads target id 0 as "everybody", and RouteRPC forwards a
+            // broadcast only to peers that are already ready - so an offer addressed to a peer
+            // without a uid reaches nobody, while SentCaps would latch and stop us ever trying
+            // again. Refuse instead: a state that never gets a peer id simply never offers.
+            if (st.PeerId == 0L) return;
             st.SentCaps = true;
             var pkg = new ZPackage();
             pkg.Write(Proto);
             pkg.Write(_dictHash);
             pkg.Write(Active2 ? 1 : 0);
             Invoke(st, RpcCaps, new object[] { pkg });
+            Log.LogInfo("[Compression] sent caps to " + (st.Who ?? st.PeerId.ToString()) +
+                        " (proto " + Proto + ", dict " + _dictHash.ToString("x8") + ")");
+        }
+
+        /// <summary>
+        /// One tick's worth of client-side handshake for a single peer. <paramref name="peerUid"/>
+        /// is ZNetPeer.m_uid, which stays 0 until ZNet.RPC_PeerInfo assigns it (ZNet.cs:1070) and,
+        /// a few lines later in that same method, hands the peer to ZRoutedRpc.AddPeer - so a
+        /// non-zero uid (== ZNetPeer.IsReady()) is exactly the point at which a routed RPC can
+        /// reach this peer. ZRoutedRpc.GetPeer is private, so there is no public way to confirm
+        /// the routed peer list beyond that. Split out of Tick so the self-test drives the same gate.
+        /// </summary>
+        private static void OfferCapsForPeer(PeerState st, long peerUid)
+        {
+            if (peerUid == 0L) return;          // not ready: an offer now would go nowhere
+            st.PeerId = peerUid;
+            if (st.SentCaps || st.CapsSeen || st.Poisoned) return;
+            SendCapsOnce(st);
         }
 
         /// <summary>
@@ -804,9 +874,15 @@ namespace SmoothServer.Net
         private static void CapsReceived(PeerState st, string who, int proto, int dictHash, int flags)
         {
             if (st.Poisoned) return;
+            bool firstCaps = !st.CapsSeen;
             st.CapsSeen = true;
             st.TheirProto = proto;
             st.TheirDictHash = dictHash;
+            // One line per peer per connection - the other half of the handshake, so a server log
+            // shows the offer arriving even when the negotiation then declines it.
+            if (firstCaps)
+                Log.LogInfo("[Compression] caps from " + who + ": proto " + proto +
+                            " dict " + dictHash.ToString("x8") + " enabled=" + flags);
 
             if (proto != Proto)
             {
@@ -938,9 +1014,13 @@ namespace SmoothServer.Net
                     {
                         var sock = peer.m_socket as ZSteamSocket;
                         if (sock == null) continue;
+                        // A ZNetPeer is in ZNet.m_peers from the moment its socket connects, but
+                        // its uid stays 0 until RPC_PeerInfo completes - and the first tick after
+                        // a join lands inside that window. Never attach or offer with uid 0
+                        // (issue #2): wait for the peer to be ready, then offer exactly once.
+                        if (!peer.IsReady()) continue;
                         var st = Attach(sock, peer.m_uid);
-                        if (st.SentCaps || st.CapsSeen || st.Poisoned) continue;
-                        SendCapsOnce(st);
+                        OfferCapsForPeer(st, peer.m_uid);
                     }
                 }
 
