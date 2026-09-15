@@ -33,17 +33,27 @@ namespace SmoothServer.Net
     /// Steam sockets only. ZPlayFabSocket already compresses (zlib, via PlayFabZLibWorkQueue)
     /// and its queue accounting differs; crossplay is left exactly as vanilla.
     ///
-    /// HANDSHAKE (routed RPCs "SS_Caps" and "SS_Ready", both directions, ordered because they
-    /// ride the same reliable socket as the data):
-    ///   client  -> server : SS_Caps {proto, flags, dictHash}
-    ///   server: learns the client's caps, sets recvFramed=true FIRST, then answers
-    ///           SS_Caps + SS_Ready
-    ///   client: learns the server's caps, sets recvFramed=true FIRST, then sends SS_Ready;
-    ///           on the server's SS_Ready it sets sendFramed=true
-    ///   server: on the client's SS_Ready it sets sendFramed=true
-    /// Each side therefore enables *receiving* frames strictly before it tells the peer it may
-    /// start *sending* them. There is no window in which a framed message can arrive at a peer
-    /// that is not yet expecting one.
+    /// HANDSHAKE (routed RPCs "SS_Caps", "SS_Ready" and "SS_Off", both directions, ordered
+    /// because they ride the same reliable socket as the data):
+    ///   client  -> server : SS_Caps {proto, dictHash, flags}
+    ///   server: learns the client's caps, answers SS_Caps + SS_Ready, and only THEN starts
+    ///           framing what it sends
+    ///   client: learns the server's caps, sends SS_Ready, and only THEN starts framing what
+    ///           it sends; on the server's SS_Ready it starts unframing what it receives
+    ///   server: on the client's SS_Ready it starts unframing what it receives
+    ///
+    /// SS_Ready is the in-band switch marker: "everything I send after this message is framed".
+    /// Both flips therefore key off the SAME byte position in the stream, which the socket's
+    /// reliable FIFO makes exact - a side never unframes a message the peer sent before its own
+    /// Ready, and never receives a framed message before it has seen that Ready. (0.5.0 set
+    /// recvFramed as soon as the peer's SS_Caps arrived, one round trip before that peer began
+    /// framing: every plain packet in the gap was mis-read as a frame - issue #1.)
+    ///
+    /// SS_Off is the same trick in reverse. If a message ever fails to unframe, that side
+    /// poisons the peer: it sends SS_Off (still framed, so the peer can read it), then goes
+    /// plain in both directions and never re-arms for that socket. The peer stops unframing at
+    /// the Off and stops framing too, so the disable is two-sided and no half-framed state can
+    /// survive.
     ///
     /// Dictionaries: dict/small (110 KB) and dict/big (512 KB) are BetterNetworking's
     /// `zstd --train` outputs over a capture of real Valheim traffic, reused under its MIT
@@ -61,8 +71,12 @@ namespace SmoothServer.Net
             + "vanilla joiner silently stays uncompressed, so this is safe to leave on."
             + Profiles.Note;
 
-        /// <summary>Wire protocol version. Bump on any framing change.</summary>
-        private const int Proto = 1;
+        /// <summary>
+        /// Wire protocol version. Bump on any framing change. 2 = the SS_Ready switch point
+        /// (0.5.1); 1 = 0.5.0, whose switch point was one round trip early. A peer that
+        /// advertises a different Proto is never framed, in either direction.
+        /// </summary>
+        private const int Proto = 2;
 
         internal const byte TagRaw = 0x00;
         internal const byte TagSmall = 0x01;
@@ -70,6 +84,7 @@ namespace SmoothServer.Net
 
         internal const string RpcCaps = "SS_Caps";
         internal const string RpcReady = "SS_Ready";
+        internal const string RpcOff = "SS_Off";
 
         private const string ResSmall = "SmoothServer.dict.small";
         private const string ResBig = "SmoothServer.dict.big";
@@ -79,6 +94,7 @@ namespace SmoothServer.Net
         private ConfigEntry<int> _minBytes;
         private ConfigEntry<int> _level;
         private ConfigEntry<bool> _useBigDict;
+        private ConfigEntry<bool> _selfTest;
 
         internal static bool Active2;                 // module applied AND enabled
         internal static int MinBytes = 256;
@@ -100,11 +116,25 @@ namespace SmoothServer.Net
             public bool SendFramed;
             public bool SentCaps;
             public bool SentReady;
+            /// <summary>An unframe failed on this socket: stay plain for the rest of its life.</summary>
+            public bool Poisoned;
             public int TheirProto;
             public int TheirDictHash;
+            public long PeerId;
             // byte[] instances we have already framed and left in m_sendQueue. Reference
             // identity (byte[] does not override Equals), so a failed send cannot double-frame.
             public readonly HashSet<byte[]> Framed = new HashSet<byte[]>();
+            // byte[] instances that were queued BEFORE the switch to framing (up to and
+            // including our own SS_Ready) and must go out untouched even though SendFramed is
+            // now true. Same reference identity; disjoint from Framed.
+            public readonly HashSet<byte[]> Plain = new HashSet<byte[]>();
+
+            // Transport hooks. The Harmony patches wire these to the real socket and routed
+            // RPC; the handshake self-test wires them to an in-process peer, so both drive
+            // exactly the same state machine.
+            public Action<string, object[]> SendRpc;
+            public Action ProtectQueue;   // mark everything queued right now "do not frame"
+            public Action RestoreQueue;   // unframe anything we framed that is still queued
         }
 
         private static readonly Dictionary<ZSteamSocket, PeerState> States =
@@ -148,6 +178,11 @@ namespace SmoothServer.Net
                 "better ratio, 512 KB more resident memory per process. Both dictionaries are always " +
                 "loaded for DEcompression, so peers may disagree on this without any loss of " +
                 "compatibility - the frame tag says which one each message used.");
+            _selfTest = BindLocal("SelfTest", false,
+                "Diagnostic: at load, run the two-peer handshake through an in-process simulation " +
+                "(caps/ready ordering, a two-sided disable after a bad frame, a proto mismatch) and " +
+                "log one PASS/FAIL line per case. Touches no sockets and changes no behaviour. " +
+                "Machine-local, never synced. Leave off.");
         }
 
         protected override void ApplyPatches()
@@ -177,6 +212,7 @@ namespace SmoothServer.Net
 
             Active2 = true;
             SelfTest();
+            if (_selfTest.Value) HandshakeSelfTest();
         }
 
         public override void Disable()
@@ -290,6 +326,200 @@ namespace SmoothServer.Net
                         " loaded, dictHash=" + _dictHash.ToString("x8") + ", sendDict=" + DictName(SendTag));
         }
 
+        // ---- handshake self-test -----------------------------------------------------------
+        //
+        // Drives the REAL state machine (CapsReceived / ReadyReceived / OffReceived / Poison /
+        // ReceiveBytes) over an in-process ordered channel instead of a socket, so the three
+        // things issue #1 turned on can be checked without two running game clients:
+        //   1. plain packets arriving between SS_Caps and SS_Ready must not be unframed,
+        //   2. one bad frame must disable compression on BOTH ends,
+        //   3. a peer on another wire proto must stay plain.
+
+        private sealed class SimMsg
+        {
+            public string Rpc;      // null => a data packet
+            public object[] Args;
+            public byte[] Wire;     // data packet exactly as it would go out
+            public byte[] Expect;   // what the receiver must end up with (null = garbage)
+        }
+
+        private sealed class SimPeer
+        {
+            public string Name;      // who this side is
+            public string PeerName;  // who it is talking to - what the real code would log
+            public PeerState St;
+            public readonly Queue<SimMsg> Inbox = new Queue<SimMsg>();
+        }
+
+        private static void SimWire(SimPeer from, SimPeer to)
+        {
+            from.PeerName = to.Name;
+            from.St.SendRpc = (rpc, args) => to.Inbox.Enqueue(new SimMsg { Rpc = rpc, Args = args });
+            from.St.ProtectQueue = () => { };   // no real send queue in the simulation
+            from.St.RestoreQueue = () => { };
+        }
+
+        private static void SimSend(SimPeer from, SimPeer to, byte[] raw)
+        {
+            to.Inbox.Enqueue(new SimMsg { Wire = from.St.SendFramed ? Frame(raw) : raw, Expect = raw });
+        }
+
+        private static void SimPump(SimPeer p, List<string> errs)
+        {
+            while (p.Inbox.Count > 0)
+            {
+                var m = p.Inbox.Dequeue();
+                if (m.Rpc == RpcCaps)
+                {
+                    var pkg = (ZPackage)m.Args[0];
+                    pkg.SetPos(0);
+                    CapsReceived(p.St, p.PeerName, pkg.ReadInt(), pkg.ReadInt(), pkg.ReadInt());
+                }
+                else if (m.Rpc == RpcReady) ReadyReceived(p.St, p.PeerName);
+                else if (m.Rpc == RpcOff) OffReceived(p.St, p.PeerName, (string)m.Args[0]);
+                else
+                {
+                    var got = ReceiveBytes(p.St, p.PeerName, m.Wire);
+                    if (m.Expect != null && !SameBytes(got, m.Expect))
+                        errs.Add(p.Name + " read a corrupt packet");
+                }
+            }
+        }
+
+        private static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        private static byte[] SimPayload(int seed, int len)
+        {
+            var pkg = new ZPackage();
+            while (pkg.Size() < len) { pkg.Write(seed); pkg.Write("Greydwarf"); pkg.Write(0f); }
+            return pkg.GetArray();
+        }
+
+        private static void SimCheck(List<string> errs, bool ok, string what)
+        {
+            if (!ok) errs.Add(what);
+        }
+
+        private void HandshakeSelfTest()
+        {
+            long rawOut = RawOut, wireOut = WireOut, rawIn = RawIn, wireIn = WireIn;
+            try
+            {
+                Case1Ordering();
+                Case2TwoSidedDisable();
+                Case3ProtoMismatch();
+            }
+            catch (Exception e)
+            {
+                Log.LogError("[Compression] self-test/handshake: threw " + e);
+            }
+            finally
+            {
+                RawOut = rawOut; WireOut = wireOut; RawIn = rawIn; WireIn = wireIn;
+            }
+        }
+
+        private static void SimResult(string name, List<string> errs)
+        {
+            if (errs.Count == 0) Log.LogInfo("[Compression] self-test/handshake: " + name + " PASS");
+            else Log.LogError("[Compression] self-test/handshake: " + name + " FAIL - " +
+                              string.Join("; ", errs.ToArray()));
+        }
+
+        /// <summary>
+        /// The issue #1 regression: the client floods plain packets in the window between its
+        /// SS_Caps and the SS_Ready round trip. Nothing may be unframed before the peer's Ready.
+        /// </summary>
+        private static void Case1Ordering()
+        {
+            var errs = new List<string>();
+            var c = new SimPeer { Name = "sim-client", St = new PeerState() };
+            var s = new SimPeer { Name = "sim-server", St = new PeerState() };
+            SimWire(c, s); SimWire(s, c);
+
+            SimSend(c, s, SimPayload(1, 900));      // plain traffic already in flight
+            SendCapsOnce(c.St);                     // client initiates
+            SimSend(c, s, SimPayload(2, 900));      // ...and keeps flooding (Jotunn does)
+
+            SimPump(s, errs);                       // 0.5.0 poisoned right here
+            SimCheck(errs, !s.St.Poisoned, "server poisoned by plain traffic after SS_Caps");
+            SimCheck(errs, s.St.SendFramed, "server did not start framing after answering SS_Ready");
+            SimCheck(errs, !s.St.RecvFramed, "server unframes before the client's SS_Ready");
+
+            SimSend(s, c, SimPayload(3, 900));      // server's first framed packet, after its Ready
+            SimPump(c, errs);                       // caps, ready, then that packet
+            SimCheck(errs, c.St.SendFramed && c.St.RecvFramed, "client did not finish the handshake");
+
+            SimSend(c, s, SimPayload(4, 900));
+            SimSend(c, s, SimPayload(5, 40));       // below MinBytes: framed with tag 0x00
+            SimPump(s, errs);
+            SimCheck(errs, s.St.RecvFramed && s.St.SendFramed, "server did not finish the handshake");
+            SimCheck(errs, !s.St.Poisoned && !c.St.Poisoned, "handshake poisoned a peer");
+            SimResult("caps/ready ordering", errs);
+        }
+
+        /// <summary>One bad frame must take compression down on both ends, not just the reader's.</summary>
+        private static void Case2TwoSidedDisable()
+        {
+            var errs = new List<string>();
+            var c = new SimPeer { Name = "sim-client", St = new PeerState() };
+            var s = new SimPeer { Name = "sim-server", St = new PeerState() };
+            SimWire(c, s); SimWire(s, c);
+
+            SendCapsOnce(c.St);
+            SimPump(s, errs);
+            SimPump(c, errs);
+            SimPump(s, errs);
+            SimCheck(errs, c.St.SendFramed && c.St.RecvFramed && s.St.SendFramed && s.St.RecvFramed,
+                     "handshake did not complete");
+
+            // A plain RoutedRPC envelope arriving where a frame was expected - the exact shape
+            // of issue #1's report, byte 0x48 first.
+            s.Inbox.Enqueue(new SimMsg { Wire = new byte[] { 0x48, 0x6f, 0x34, 0xd8, 0x01, 0x02 } });
+            SimPump(s, errs);
+            SimCheck(errs, s.St.Poisoned && !s.St.SendFramed && !s.St.RecvFramed,
+                     "reader did not disable itself");
+            SimPump(c, errs);                       // the SS_Off
+            SimCheck(errs, c.St.Poisoned && !c.St.SendFramed && !c.St.RecvFramed,
+                     "peer kept framing after SS_Off");
+
+            var after = SimPayload(6, 900);
+            SimSend(c, s, after); SimSend(s, c, after);
+            SimPump(s, errs); SimPump(c, errs);     // both directions plain and intact
+
+            c.St.SentCaps = false; SendCapsOnce(c.St);   // a fresh handshake attempt
+            SimPump(s, errs);
+            SimCheck(errs, !s.St.SendFramed && !s.St.RecvFramed, "a poisoned peer re-armed");
+            SimResult("two-sided disable", errs);
+        }
+
+        /// <summary>A 0.5.0 peer (proto 1) must leave both sides exactly as vanilla.</summary>
+        private static void Case3ProtoMismatch()
+        {
+            var errs = new List<string>();
+            var c = new SimPeer { Name = "sim-client", St = new PeerState() };
+            var s = new SimPeer { Name = "sim-server", St = new PeerState() };
+            SimWire(c, s); SimWire(s, c);
+
+            CapsReceived(s.St, s.PeerName, Proto - 1, _dictHash, 1);
+            SimCheck(errs, !s.St.SendFramed && !s.St.RecvFramed && !s.St.Poisoned,
+                     "framing negotiated with an old-proto peer");
+            SimCheck(errs, s.St.SentCaps && !s.St.SentReady, "server answered a proto mismatch with SS_Ready");
+            int ready = 0;
+            foreach (var m in c.Inbox) if (m.Rpc == RpcReady) ready++;
+            SimCheck(errs, ready == 0, "SS_Ready sent to an old-proto peer");
+
+            c.Inbox.Clear();
+            SimSend(s, c, SimPayload(7, 900));      // still plain, still readable
+            SimPump(c, errs);
+            SimResult("proto mismatch", errs);
+        }
+
         internal static byte[] Compress(byte[] raw, byte tag)
         {
             var c = tag == TagBig ? _cBig : _cSmall;
@@ -333,19 +563,23 @@ namespace SmoothServer.Net
 
         private static byte[] Unframe(byte[] framed)
         {
+            var raw = UnframeNoStats(framed);
+            WireIn += framed.Length;
+            RawIn += raw.Length;
+            return raw;
+        }
+
+        /// <summary>Unframe without touching the counters (used to undo a queued frame).</summary>
+        private static byte[] UnframeNoStats(byte[] framed)
+        {
             if (framed.Length < 1) return framed;
             byte tag = framed[0];
             var payload = new byte[framed.Length - 1];
             Buffer.BlockCopy(framed, 1, payload, 0, payload.Length);
 
-            byte[] raw;
-            if (tag == TagRaw) raw = payload;
-            else if (tag == TagSmall || tag == TagBig) raw = Decompress(payload, tag);
-            else throw new Exception("unknown frame tag 0x" + tag.ToString("x2"));
-
-            WireIn += framed.Length;
-            RawIn += raw.Length;
-            return raw;
+            if (tag == TagRaw) return payload;
+            if (tag == TagSmall || tag == TagBig) return Decompress(payload, tag);
+            throw new Exception("unknown frame tag 0x" + tag.ToString("x2"));
         }
 
         // ---- patches ---------------------------------------------------------------------
@@ -370,12 +604,16 @@ namespace SmoothServer.Net
 
             var outq = new Queue<byte[]>(___m_sendQueue.Count);
             var stillFramed = new HashSet<byte[]>();
+            var stillPlain = new HashSet<byte[]>();
             foreach (var pkt in ___m_sendQueue)
             {
                 if (pkt == null) continue;
                 // Already framed on an earlier call whose send failed - pass it through
                 // untouched. This is BetterNetworking's double-compression bug, fixed.
                 if (st.Framed.Contains(pkt)) { outq.Enqueue(pkt); stillFramed.Add(pkt); continue; }
+                // Queued before the switch (our SS_Ready and anything ahead of it): the peer
+                // reads these as plain, so they must stay plain.
+                if (st.Plain.Contains(pkt)) { outq.Enqueue(pkt); stillPlain.Add(pkt); continue; }
                 byte[] framed;
                 try { framed = Frame(pkt); }
                 catch (Exception e) { Log.LogError("[Compression] framing failed: " + e); outq.Enqueue(pkt); continue; }
@@ -385,7 +623,43 @@ namespace SmoothServer.Net
 
             st.Framed.Clear();
             foreach (var b in stillFramed) st.Framed.Add(b);
+            st.Plain.Clear();
+            foreach (var b in stillPlain) st.Plain.Add(b);
             ___m_sendQueue = outq;
+        }
+
+        /// <summary>
+        /// Everything sitting in the send queue right now was produced before we flipped to
+        /// framing (our own SS_Ready is the last of them, because ZSteamSocket.Send enqueues and
+        /// drains synchronously - the queue is normally already empty here). Mark them so
+        /// SendPrefix passes them through plain if a failed send left them behind.
+        /// </summary>
+        private static void ProtectQueuedPlain(ZSteamSocket sock, PeerState st)
+        {
+            if (sock == null || sock.m_sendQueue == null) return;
+            foreach (var pkt in sock.m_sendQueue) if (pkt != null) st.Plain.Add(pkt);
+        }
+
+        /// <summary>
+        /// The peer has stopped unframing (it sent SS_Off). Anything we framed that is still
+        /// queued would be unreadable to it, so put those packets back to their raw bytes
+        /// rather than dropping them.
+        /// </summary>
+        private static void RestoreQueuedRaw(ZSteamSocket sock, PeerState st)
+        {
+            if (sock == null || sock.m_sendQueue == null || sock.m_sendQueue.Count == 0) return;
+            var outq = new Queue<byte[]>(sock.m_sendQueue.Count);
+            foreach (var pkt in sock.m_sendQueue)
+            {
+                if (pkt == null) continue;
+                if (st.Framed.Contains(pkt))
+                {
+                    try { outq.Enqueue(UnframeNoStats(pkt)); continue; }
+                    catch (Exception e) { Log.LogWarning("[Compression] could not restore a queued packet: " + e.Message); }
+                }
+                outq.Enqueue(pkt);
+            }
+            sock.m_sendQueue = outq;
         }
 
         private static void RecvPostfix(ZSteamSocket __instance, ref ZPackage __result)
@@ -394,19 +668,22 @@ namespace SmoothServer.Net
             var st = Get(__instance, false);
             if (st == null || !st.RecvFramed) return;
 
-            try
-            {
-                __result = new ZPackage(Unframe(__result.GetArray()));
-            }
-            catch (Exception e)
-            {
-                // Never throw on the receive path. A stream we cannot unframe means the peer
-                // disagrees with us about framing - stop framing this peer and say so loudly.
-                st.RecvFramed = false;
-                st.SendFramed = false;
-                Log.LogError("[Compression] unframing failed for " + __instance.GetHostName() +
-                             " - compression disabled for this peer: " + e.Message);
-            }
+            var wire = __result.GetArray();
+            var raw = ReceiveBytes(st, __instance.GetHostName(), wire);
+            if (!ReferenceEquals(raw, wire)) __result = new ZPackage(raw);
+        }
+
+        /// <summary>
+        /// The receive half of the state machine, socket-free so the self-test can drive it.
+        /// Returns the raw bytes, or the input untouched when we are not unframing this peer
+        /// (or just stopped). Never throws: a stream we cannot unframe means the peer disagrees
+        /// with us about framing, which poisons the socket for good.
+        /// </summary>
+        private static byte[] ReceiveBytes(PeerState st, string who, byte[] wire)
+        {
+            if (!st.RecvFramed) return wire;
+            try { return Unframe(wire); }
+            catch (Exception e) { Poison(st, who, e.Message); return wire; }
         }
 
         private static void DisconnectPrefix(ZNetPeer peer)
@@ -433,8 +710,10 @@ namespace SmoothServer.Net
             {
                 rrpc.Register<ZPackage>(RpcCaps, OnCaps);
                 rrpc.Register(RpcReady, OnReady);
+                rrpc.Register<string>(RpcOff, OnOff);
                 _rpcsRegistered = true;
-                Log.LogInfo("[Compression] routed RPCs '" + RpcCaps + "' / '" + RpcReady + "' registered");
+                Log.LogInfo("[Compression] routed RPCs '" + RpcCaps + "' / '" + RpcReady + "' / '" +
+                            RpcOff + "' registered");
             }
             catch (Exception e)
             {
@@ -453,13 +732,60 @@ namespace SmoothServer.Net
             return peer != null ? peer.m_socket as ZSteamSocket : null;
         }
 
-        private static void SendCaps(long peerId)
+        /// <summary>
+        /// Attach the live transport to a socket's state: the routed-RPC sender and the two
+        /// send-queue fix-ups. Idempotent; the self-test substitutes its own hooks instead.
+        /// </summary>
+        private static PeerState Attach(ZSteamSocket sock, long peerId)
         {
+            var st = Get(sock, true);
+            st.PeerId = peerId;
+            if (st.SendRpc == null)
+            {
+                var s = sock;
+                var state = st;
+                st.SendRpc = (name, args) =>
+                {
+                    var rrpc = ZRoutedRpc.instance;
+                    if (rrpc != null) rrpc.InvokeRoutedRPC(state.PeerId, name, args);
+                };
+                st.ProtectQueue = () => ProtectQueuedPlain(s, state);
+                st.RestoreQueue = () => RestoreQueuedRaw(s, state);
+            }
+            return st;
+        }
+
+        private static void Invoke(PeerState st, string rpc, object[] args)
+        {
+            if (st.SendRpc == null) return;
+            try { st.SendRpc(rpc, args); }
+            catch (Exception e) { Log.LogWarning("[Compression] " + rpc + " send failed: " + e.Message); }
+        }
+
+        private static void SendCapsOnce(PeerState st)
+        {
+            if (st.SentCaps) return;
+            st.SentCaps = true;
             var pkg = new ZPackage();
             pkg.Write(Proto);
             pkg.Write(_dictHash);
             pkg.Write(Active2 ? 1 : 0);
-            ZRoutedRpc.instance.InvokeRoutedRPC(peerId, RpcCaps, pkg);
+            Invoke(st, RpcCaps, new object[] { pkg });
+        }
+
+        /// <summary>
+        /// Send SS_Ready and, from the very next byte on, frame everything. The Ready itself
+        /// goes out plain: ZSteamSocket.Send enqueues and drains inside the Invoke above, while
+        /// SendFramed is still false, so SendPrefix cannot see it - and if that send failed and
+        /// left it queued, ProtectQueue marks it (and anything ahead of it) untouchable.
+        /// </summary>
+        private static void SendReadyAndSwitch(PeerState st)
+        {
+            if (st.SentReady) return;
+            st.SentReady = true;
+            Invoke(st, RpcReady, new object[0]);
+            if (st.ProtectQueue != null) st.ProtectQueue();
+            st.SendFramed = true;
         }
 
         private static void OnCaps(long sender, ZPackage pkg)
@@ -467,35 +793,42 @@ namespace SmoothServer.Net
             if (!Active2 || !_codecsReady) return;
             var sock = SocketOf(sender);
             if (sock == null) return;                    // PlayFab peer, or gone
-            var st = Get(sock, true);
+            var st = Attach(sock, sender);
 
             int proto = pkg.ReadInt();
             int dictHash = pkg.ReadInt();
             int flags = pkg.ReadInt();
+            CapsReceived(st, sock.GetHostName(), proto, dictHash, flags);
+        }
+
+        private static void CapsReceived(PeerState st, string who, int proto, int dictHash, int flags)
+        {
+            if (st.Poisoned) return;
             st.CapsSeen = true;
             st.TheirProto = proto;
             st.TheirDictHash = dictHash;
 
-            bool compatible = proto == Proto && dictHash == _dictHash && flags != 0;
-            if (!compatible)
+            if (proto != Proto)
             {
-                Log.LogWarning("[Compression] " + sock.GetHostName() + " advertises proto=" + proto +
+                // A 0.5.0 peer (proto 1) framed one round trip too early - issue #1. Different
+                // proto, no framing, in either direction: both sides stay exactly as vanilla.
+                Log.LogInfo("[Compression] " + who + " runs SmoothServer wire proto " + proto +
+                            " (ours " + Proto + ") - staying uncompressed with this peer");
+                SendCapsOnce(st);
+                return;
+            }
+            if (dictHash != _dictHash || flags == 0)
+            {
+                Log.LogWarning("[Compression] " + who + " advertises proto=" + proto +
                                " dict=" + dictHash.ToString("x8") + " enabled=" + flags +
                                " (ours proto=" + Proto + " dict=" + _dictHash.ToString("x8") +
                                ") - staying uncompressed with this peer");
-                if (!st.SentCaps) { st.SentCaps = true; SendCaps(sender); }
+                SendCapsOnce(st);
                 return;
             }
 
-            // Enable RECEIVING before telling them they may start SENDING. This ordering is the
-            // whole safety argument: a framed message can never reach a peer that is not ready.
-            st.RecvFramed = true;
-            if (!st.SentCaps) { st.SentCaps = true; SendCaps(sender); }
-            if (!st.SentReady)
-            {
-                st.SentReady = true;
-                ZRoutedRpc.instance.InvokeRoutedRPC(sender, RpcReady, new object[0]);
-            }
+            SendCapsOnce(st);
+            SendReadyAndSwitch(st);
         }
 
         private static void OnReady(long sender)
@@ -503,18 +836,81 @@ namespace SmoothServer.Net
             if (!Active2 || !_codecsReady) return;
             var sock = SocketOf(sender);
             if (sock == null) return;
-            var st = Get(sock, true);
-            if (st.SendFramed) return;
-            st.SendFramed = true;
+            var st = Attach(sock, sender);
+            ReadyReceived(st, sock.GetHostName());
+        }
+
+        /// <summary>
+        /// The peer's SS_Ready: everything it sends from here on is framed, so start unframing
+        /// at exactly this point in its stream.
+        /// </summary>
+        private static void ReadyReceived(PeerState st, string who)
+        {
+            if (st.Poisoned || st.RecvFramed) return;
+            st.RecvFramed = true;
             RecountFramed();
-            Log.LogInfo("[Compression] " + sock.GetHostName() + " negotiated: framing on (dict=" +
+            Log.LogInfo("[Compression] " + who + " negotiated: framing on (dict=" +
                         DictName(SendTag) + ", proto " + Proto + ")");
+        }
+
+        private static void OnOff(long sender, string reason)
+        {
+            if (!Active2 || !_codecsReady) return;
+            var sock = SocketOf(sender);
+            if (sock == null) return;
+            var st = Get(sock, false);
+            if (st == null) return;
+            OffReceived(st, sock.GetHostName(), reason);
+        }
+
+        /// <summary>
+        /// We could not unframe something. Tell the peer while it can still understand us (the
+        /// SS_Off goes out framed, because our send direction may well be fine), then drop to
+        /// plain in both directions for the rest of this socket's life.
+        /// </summary>
+        private static void Poison(PeerState st, string who, string reason)
+        {
+            bool first = !st.Poisoned;
+            st.Poisoned = true;
+            if (first && st.SendFramed) Invoke(st, RpcOff, new object[] { reason ?? "" });
+            // Anything still queued is ahead of that SS_Off and was framed while the peer was
+            // still unframing, so it stays as it is; only what comes after goes plain.
+            st.RecvFramed = false;
+            st.SendFramed = false;
+            st.Framed.Clear();
+            st.Plain.Clear();
+            RecountFramed();
+            if (first)
+                Log.LogError("[Compression] " + who + " compression disabled (" + reason +
+                             ") - running plain");
+        }
+
+        /// <summary>
+        /// The peer's SS_Off: it stopped unframing at the moment it sent this, so everything
+        /// after it is plain in both directions.
+        /// </summary>
+        private static void OffReceived(PeerState st, string who, string reason)
+        {
+            bool first = !st.Poisoned;
+            st.Poisoned = true;
+            st.RecvFramed = false;
+            if (st.SendFramed)
+            {
+                st.SendFramed = false;
+                if (st.RestoreQueue != null) st.RestoreQueue();
+            }
+            st.Framed.Clear();
+            st.Plain.Clear();
+            RecountFramed();
+            if (first)
+                Log.LogWarning("[Compression] " + who + " compression disabled (peer reported: " +
+                               reason + ") - running plain");
         }
 
         private static void RecountFramed()
         {
             int n = 0;
-            foreach (var kv in States) if (kv.Value.SendFramed) n++;
+            foreach (var kv in States) if (kv.Value.SendFramed && kv.Value.RecvFramed) n++;
             FramedPeers = n;
         }
 
@@ -542,11 +938,9 @@ namespace SmoothServer.Net
                     {
                         var sock = peer.m_socket as ZSteamSocket;
                         if (sock == null) continue;
-                        var st = Get(sock, true);
-                        if (st.SentCaps || st.CapsSeen) continue;
-                        st.SentCaps = true;
-                        try { SendCaps(peer.m_uid); }
-                        catch (Exception e) { Log.LogWarning("[Compression] caps send failed: " + e.Message); }
+                        var st = Attach(sock, peer.m_uid);
+                        if (st.SentCaps || st.CapsSeen || st.Poisoned) continue;
+                        SendCapsOnce(st);
                     }
                 }
 

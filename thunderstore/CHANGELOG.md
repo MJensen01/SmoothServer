@@ -1,5 +1,26 @@
 # Changelog — SmoothServer
 
+## 0.5.1 (unreleased)
+
+**Compression: a client that also runs SmoothServer could be dropped into an empty world.** The server
+started unframing one round trip before the client started framing ([issue #1]), so every plain packet in
+that window was read as a frame and the peer's stream was lost in one direction. The switch now happens on
+the `SS_Ready` message on both sides, a failure disables compression on both ends, and 0.5.0 peers stay
+uncompressed.
+
+* `[Compression]` handshake: `SS_Ready` is the in-band switch marker - "everything I send after this message
+  is framed". A side starts framing right after sending its own Ready and starts unframing exactly at the
+  peer's Ready, so both flips key off the same byte position in the socket's reliable FIFO.
+* New `SS_Off` message: if a frame ever fails to unframe, that side tells the peer (framed, while it can
+  still be read), then both ends drop to plain for the rest of the connection and never re-arm. One
+  `[Compression] <peer> compression disabled (reason) - running plain` line per side.
+* Wire proto bumped to 2: a 0.5.0 peer (proto 1) is never framed, in either direction - it logs one info
+  line and stays uncompressed. Servers whose clients have no mod negotiate nothing, exactly as before.
+* New machine-local `[Compression] SelfTest` (default off): runs the two-peer handshake through an
+  in-process simulation at load and logs a PASS/FAIL line per case.
+
+[issue #1]: https://github.com/MJensen01/SmoothServer/issues/1
+
 ## 0.5.0 (2026-09-09) — Valheim 1.0
 
 **Rebuilt for Valheim 1.0.7 (network version 39).** Requires BepInExPack_Valheim 5.4.2350. Not compatible
