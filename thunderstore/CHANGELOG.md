@@ -2,6 +2,27 @@
 
 ## 0.5.1 (unreleased)
 
+* **PeerTelemetry read zeros on dedicated servers, so AdaptiveBudget never adapted — fixed.** Every
+  `[PeerTelemetry]` line showed `ping=0ms qual=0.00/0.00 … steamRate=0B/s` for every player, forever
+  (15,761 samples on the live server without a single non-zero), and `[AdaptiveBudget] samples=0
+  base=65536B (steady)` — the per-peer budget silently fell back to one fixed number for everybody.
+  The Steam interface was never the problem: `peer.m_socket as ZSteamSocket` was returning null.
+  ServerSync (vendored by SmoothServer, by NoVikingLeftBehind *and* by third-party mods) swaps a
+  decorator socket into `ZNetPeer.m_socket` during the login RPC and restores it from a coroutine,
+  but each copy's restore only recognises its own `BufferingSocket` type — with several copies
+  loaded the unwind does not complete and a player keeps another mod's decorator for the rest of the
+  session. Telemetry now unwraps the decorator chain to the real socket, a single refused connection
+  no longer latches the Steam read off for the whole process, and every outcome is logged exactly
+  once (`live stats OK for <name>: ping=Nms`, `GetConnectionRealTimeStatus failed (<result>) — stats
+  unavailable`, `peer '<name>' socket is <Type> with no ZSteamSocket behind it`) — it can never read
+  zeros silently again.
+* **New `LagProbe` module** (`[LagProbe]`, on by default, diagnostics only — it changes no gameplay
+  value): server→player RTT/jitter/loss pings (`SS_Ping`/`SS_Pong`, measured on the server's own
+  clock and independent of Steam's statistics, surfaced in the PeerTelemetry line and StatsLog), a
+  client-side hit-registration latency histogram (time from a hit on something you do not own until
+  the owner's answer lands, with p50/p95/max and a per-owner breakdown), ZDO ownership churn within
+  30 m, and an `ss.lag` console command that prints the current summary on demand.
+
 **Compression: a client that also runs SmoothServer could be dropped into an empty world.** The server
 started unframing one round trip before the client started framing ([issue #1]), so every plain packet in
 that window was read as a frame and the peer's stream was lost in one direction. The switch now happens on

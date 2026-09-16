@@ -288,6 +288,7 @@ namespace SmoothServer
             TelemetryModule.Tick(dt);
             FrameRateModule.Tick(dt);
             CompressionModule.Tick(dt);
+            LagProbeModule.Tick(dt);
             SharedMapModule.Tick(dt);
             ServerModules.Tick(dt);
 

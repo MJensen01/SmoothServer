@@ -281,6 +281,17 @@ namespace SmoothServer
                     kvs.Add(Json.KV("budgetTargetBytes", target));
                     kvs.Add(Json.KV("budgetCongested", congested));
                 }
+
+                // LagProbe's own round trip - independent of Steam answering at all.
+                float probeRtt, probeJitter, probeLoss, clientFrameMs;
+                if (LagProbeModule.TryGetPeer(s.Uid, out probeRtt, out probeJitter,
+                                              out probeLoss, out clientFrameMs))
+                {
+                    kvs.Add(Json.KV("probeRttMs", probeRtt));
+                    kvs.Add(Json.KV("probeJitterMs", probeJitter));
+                    kvs.Add(Json.KV("probeLossPct", probeLoss));
+                    kvs.Add(Json.KV("clientFrameMs", clientFrameMs));
+                }
                 peersJson.Add(Json.ObjRaw(kvs));
             }
 
