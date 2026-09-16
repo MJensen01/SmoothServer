@@ -1,5 +1,59 @@
 # Changelog — SmoothServer
 
+## 0.5.1 (unreleased)
+
+* **PeerTelemetry read zeros on dedicated servers, so AdaptiveBudget never adapted — fixed.** Every
+  `[PeerTelemetry]` line showed `ping=0ms qual=0.00/0.00 … steamRate=0B/s` for every player, forever
+  (15,761 samples on the live server without a single non-zero), and `[AdaptiveBudget] samples=0
+  base=65536B (steady)` — the per-peer budget silently fell back to one fixed number for everybody.
+  The Steam interface was never the problem: `peer.m_socket as ZSteamSocket` was returning null.
+  ServerSync (vendored by SmoothServer, by NoVikingLeftBehind *and* by third-party mods) swaps a
+  decorator socket into `ZNetPeer.m_socket` during the login RPC and restores it from a coroutine,
+  but each copy's restore only recognises its own `BufferingSocket` type — with several copies
+  loaded the unwind does not complete and a player keeps another mod's decorator for the rest of the
+  session. Telemetry now unwraps the decorator chain to the real socket, a single refused connection
+  no longer latches the Steam read off for the whole process, and every outcome is logged exactly
+  once (`live stats OK for <name>: ping=Nms`, `GetConnectionRealTimeStatus failed (<result>) — stats
+  unavailable`, `peer '<name>' socket is <Type> with no ZSteamSocket behind it`) — it can never read
+  zeros silently again.
+* **New `LagProbe` module** (`[LagProbe]`, on by default, diagnostics only — it changes no gameplay
+  value): server→player RTT/jitter/loss pings (`SS_Ping`/`SS_Pong`, measured on the server's own
+  clock and independent of Steam's statistics, surfaced in the PeerTelemetry line and StatsLog), a
+  client-side hit-registration latency histogram (time from a hit on something you do not own until
+  the owner's answer lands, with p50/p95/max and a per-owner breakdown), ZDO ownership churn within
+  30 m, and an `ss.lag` console command that prints the current summary on demand.
+
+**Compression: a client that also runs SmoothServer could be dropped into an empty world.** The server
+started unframing one round trip before the client started framing ([issue #1]), so every plain packet in
+that window was read as a frame and the peer's stream was lost in one direction. The switch now happens on
+the `SS_Ready` message on both sides, a failure disables compression on both ends, and 0.5.0 peers stay
+uncompressed.
+
+* `[Compression]` handshake: `SS_Ready` is the in-band switch marker - "everything I send after this message
+  is framed". A side starts framing right after sending its own Ready and starts unframing exactly at the
+  peer's Ready, so both flips key off the same byte position in the socket's reliable FIFO.
+* New `SS_Off` message: if a frame ever fails to unframe, that side tells the peer (framed, while it can
+  still be read), then both ends drop to plain for the rest of the connection and never re-arm. One
+  `[Compression] <peer> compression disabled (reason) - running plain` line per side.
+* Wire proto bumped to 2: a 0.5.0 peer (proto 1) is never framed, in either direction - it logs one info
+  line and stays uncompressed. Servers whose clients have no mod negotiate nothing, exactly as before.
+* The client could send its capabilities before the server had assigned it a peer id, so the offer was
+  dropped and never retried — compression silently never negotiated. The offer now waits for the peer to be
+  ready, and both sides log the handshake.
+* New machine-local `[Compression] SelfTest` (default off): runs the two-peer handshake through an
+  in-process simulation at load and logs a PASS/FAIL line per case.
+* **Both the compression handshake and PeerTelemetry now look through ServerSync's `BufferingSocket`
+  wrapper; on servers running several ServerSync-based mods the peer socket stayed wrapped for the
+  whole session, so neither could see the Steam socket.** `SocketOf` returned null, `OnCaps` bailed
+  out, and compression could never be negotiated on a server like that no matter what both ends ran.
+  Every peer-socket lookup now resolves the real `ZSteamSocket` behind the decorator chain - the same
+  instance the `SendQueuedPackages`/`Recv` patches fire on, so the per-socket state still matches -
+  and logs it once per peer (`peer socket wrapped by <Type>, using the ZSteamSocket behind it`, or
+  `peer '<host>' socket is <Type> with no ZSteamSocket behind it - staying plain`). A fifth self-test
+  case covers it.
+
+[issue #1]: https://github.com/MJensen01/SmoothServer/issues/1
+
 ## 0.5.0 (2026-09-09) — Valheim 1.0
 
 **Rebuilt for Valheim 1.0.7 (network version 39).** Requires BepInExPack_Valheim 5.4.2350. Not compatible

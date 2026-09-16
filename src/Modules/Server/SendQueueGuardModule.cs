@@ -65,6 +65,8 @@ namespace SmoothServer
             public bool InEpisode;
             public int Failures;
             public int Deferrals;
+            /// <summary>Like Deferrals, but never reset - LagProbe reports the delta per interval.</summary>
+            public int DeferralsEver;
             public int Dropped;
             public float LastReport;
             public string LastReason;
@@ -72,6 +74,25 @@ namespace SmoothServer
 
         private static readonly Dictionary<ZSteamSocket, GuardState> States =
             new Dictionary<ZSteamSocket, GuardState>();
+
+        /// <summary>
+        /// Every deferred frame since load, for LagProbe's summary (it reports the delta over its
+        /// own interval). Process-wide rather than per peer: the state dictionary is keyed by
+        /// socket, and a peer's socket is not always reachable from the peer (see
+        /// PeerTelemetryModule's decorator note).
+        /// </summary>
+        internal static int DeferralsTotal;
+
+        /// <summary>
+        /// Deferred frames recorded for one socket since load (never reset). LagProbe resolves a
+        /// peer to its real ZSteamSocket and reports the delta over its summary interval.
+        /// </summary>
+        internal static int DeferralsFor(ZSteamSocket sock)
+        {
+            GuardState st;
+            if (sock == null || !States.TryGetValue(sock, out st)) return 0;
+            return st.DeferralsEver;
+        }
 
         /// <summary>One reported drop episode, for StatsLog's events-*.jsonl.</summary>
         internal struct DropEvent { public string Endpoint; public int Count; }
@@ -177,6 +198,8 @@ namespace SmoothServer
                 if (now < st.BlockedUntil)
                 {
                     st.Deferrals++;
+                    st.DeferralsEver++;
+                    DeferralsTotal++;
                     return false;           // still inside the back-off window
                 }
 

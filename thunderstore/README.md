@@ -102,6 +102,13 @@ Each module has its own `Enabled` toggle in its config section.
   module is turned off. Pin sharing is configurable per pin type; death pins are off by default.
 - **ClientNet** `[Client]` — *client only*. Your client's own ZDO send high-water mark (default
   48 KB, vanilla 10 KB) and Steam `SendRateMax`. Inactive on a dedicated server.
+- **LagProbe** `[LagProbe]` — *both ends, diagnostics only; it changes nothing about the game.*
+  The server pings each player every 5 s over a routed RPC and reports that player's real RTT,
+  jitter, packet loss and frame rate (all measured on the server's own clock, so it works whatever
+  Steam reports). On your client it times **hit registration** — from the moment you hit something
+  someone else owns until the owner's answer comes back — and keeps a p50/p95/max histogram plus a
+  per-owner breakdown, and it counts how often objects near you change owner. Type `ss.lag` in the
+  console for the current summary on either side.
 
 ## Config
 
