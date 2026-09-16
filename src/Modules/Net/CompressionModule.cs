@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.Serialization;
 using BepInEx.Configuration;
 using HarmonyLib;
 using ZstdSharp;
@@ -143,6 +144,9 @@ namespace SmoothServer.Net
         private static readonly Dictionary<ZSteamSocket, PeerState> States =
             new Dictionary<ZSteamSocket, PeerState>();
 
+        /// <summary>Peers we have already logged a wrapped / non-Steam socket for. Never spammy.</summary>
+        private static readonly HashSet<string> WrapNoted = new HashSet<string>();
+
         private static bool _rpcsRegistered;
         private static float _handshakeTimer;
         private static float _statsTimer;
@@ -160,7 +164,7 @@ namespace SmoothServer.Net
             var net = ZNet.instance;
             if (net == null) return false;
             var peer = net.GetPeer(peerUid);
-            var sock = peer != null ? peer.m_socket as ZSteamSocket : null;
+            var sock = SteamSocketOf(peer);
             if (sock == null) return false;
             PeerState st;
             return States.TryGetValue(sock, out st) && st.SendFramed;
@@ -222,6 +226,7 @@ namespace SmoothServer.Net
         {
             Active2 = false;
             States.Clear();
+            WrapNoted.Clear();
             base.Disable();
         }
 
@@ -338,7 +343,11 @@ namespace SmoothServer.Net
         //   2. one bad frame must disable compression on BOTH ends,
         //   3. a peer on another wire proto must stay plain,
         // plus the one issue #2 turned on:
-        //   4. the client must not spend its one offer before the peer has a uid.
+        //   4. the client must not spend its one offer before the peer has a uid,
+        // and the one the live server turned on:
+        //   5. a peer still holding a ServerSync BufferingSocket must negotiate anyway, with its
+        //      state keyed on the ZSteamSocket behind the wrapper - the instance the Harmony
+        //      patches fire on.
 
         private sealed class SimMsg
         {
@@ -424,6 +433,7 @@ namespace SmoothServer.Net
                 Case2TwoSidedDisable();
                 Case3ProtoMismatch();
                 Case4PeerNotReady();
+                Case5WrappedSocket();
             }
             catch (Exception e)
             {
@@ -564,6 +574,94 @@ namespace SmoothServer.Net
             foreach (var m in s.Inbox) if (m.Rpc == RpcCaps) caps++;
             SimCheck(errs, caps == 0, "client re-offered caps after the handshake");
             SimResult("peer readiness", errs);
+        }
+
+        /// <summary>
+        /// A stand-in for ServerSync's BufferingSocket: an ISocket that is NOT a ZSteamSocket and
+        /// holds the socket it decorates in a field called <c>Original</c>, forwarding everything
+        /// to it. Same shape the resolver has to see through on the live server.
+        /// </summary>
+        private sealed class SimBufferingSocket : ISocket
+        {
+            public ISocket Original;
+            public string Host = "sim-wrapped";
+
+            public bool IsConnected() { return true; }
+            public void Send(ZPackage pkg) { Original.Send(pkg); }
+            public ZPackage Recv() { return Original.Recv(); }
+            public int GetSendQueueSize() { return Original.GetSendQueueSize(); }
+            public int GetCurrentSendRate() { return Original.GetCurrentSendRate(); }
+            public bool IsHost() { return false; }
+            public void Dispose() { }
+            public bool GotNewData() { return false; }
+            public void Close() { }
+            public string GetEndPointString() { return Host; }
+            public void GetAndResetStats(out int totalSent, out int totalRecv) { totalSent = 0; totalRecv = 0; }
+            public void GetConnectionQuality(out float localQuality, out float remoteQuality, out int ping,
+                                             out float outByteSec, out float inByteSec)
+            { localQuality = 0f; remoteQuality = 0f; ping = 0; outByteSec = 0f; inByteSec = 0f; }
+            public ISocket Accept() { return null; }
+            public int GetHostPort() { return 0; }
+            public bool Flush() { return true; }
+            public string GetHostName() { return Host; }
+            public void VersionMatch() { }
+        }
+
+        /// <summary>
+        /// The live-server bug: with several vendored ServerSync copies loaded, a peer keeps a
+        /// BufferingSocket in ZNetPeer.m_socket for the whole session, so every
+        /// <c>m_socket as ZSteamSocket</c> was null - SocketOf returned null, OnCaps bailed out as
+        /// "PlayFab peer, or gone", and the handshake could never start or be answered. Resolving
+        /// through the wrapper must find the ZSteamSocket, negotiate normally, and key the state on
+        /// that inner instance, because that is the one SendQueuedPackages / Recv are patched on.
+        /// </summary>
+        private static void Case5WrappedSocket()
+        {
+            var errs = new List<string>();
+            // A ZSteamSocket we never touch, only identify: its real constructor registers Steam
+            // callbacks and adds itself to a static list, neither of which belongs in a self-test.
+            var inner = (ZSteamSocket)FormatterServices.GetUninitializedObject(typeof(ZSteamSocket));
+            try
+            {
+                var wrapper = new SimBufferingSocket { Original = inner };
+
+                var resolved = SteamSocketOf(wrapper);
+                SimCheck(errs, ReferenceEquals(resolved, inner),
+                         "no ZSteamSocket found behind the wrapper");
+                if (resolved == null) { SimResult("wrapped socket", errs); return; }
+
+                // Attach exactly as OnCaps and the Tick sweep now do - through the resolver.
+                var st = Get(resolved, true);
+                st.Who = "sim-wrapped";          // keep Attach off the uninitialised GetHostName
+                var s = new SimPeer { Name = "sim-wrapped-server", St = Attach(resolved, SimPeerId) };
+                var c = new SimPeer { Name = "sim-client", St = new PeerState() };
+                SimWire(s, c); SimWire(c, s);
+
+                // Get(inner, false) is what SendPrefix/RecvPostfix do with their __instance.
+                SimCheck(errs, ReferenceEquals(s.St, st) && ReferenceEquals(Get(inner, false), st),
+                         "state is not keyed on the ZSteamSocket the Harmony patches see");
+
+                SendCapsOnce(c.St);              // the client offers, as it does on a real join
+                SimPump(s, errs);                // server: caps + ready, then frames what it sends
+                SimPump(c, errs);
+                SimPump(s, errs);
+                SimCheck(errs, s.St.SendFramed && s.St.RecvFramed,
+                         "the wrapped peer never negotiated framing");
+                SimCheck(errs, c.St.SendFramed && c.St.RecvFramed,
+                         "the client never negotiated with a wrapped peer");
+
+                SimSend(c, s, SimPayload(8, 900));
+                SimSend(s, c, SimPayload(9, 900));
+                SimPump(s, errs); SimPump(c, errs);
+                SimCheck(errs, !s.St.Poisoned && !c.St.Poisoned,
+                         "a framed packet did not survive the wrapped path");
+            }
+            finally
+            {
+                States.Remove(inner);
+                RecountFramed();
+            }
+            SimResult("wrapped socket", errs);
         }
 
         internal static byte[] Compress(byte[] raw, byte tag)
@@ -734,7 +832,10 @@ namespace SmoothServer.Net
 
         private static void DisconnectPrefix(ZNetPeer peer)
         {
-            var s = peer != null ? peer.m_socket as ZSteamSocket : null;
+            // Same resolution as everywhere else: States is keyed on the inner ZSteamSocket, so a
+            // peer whose m_socket is still wrapped must be looked up through the wrapper too -
+            // otherwise its state leaks until the Tick prune notices the socket is gone.
+            var s = SteamSocketOf(peer);
             if (s != null && States.Remove(s)) RecountFramed();
         }
 
@@ -742,6 +843,7 @@ namespace SmoothServer.Net
         {
             // A fresh ZRoutedRpc = a fresh session: every socket, and every handshake, is gone.
             States.Clear();
+            WrapNoted.Clear();
             FramedPeers = 0;
             _rpcsRegistered = false;
             TryRegisterRpcs();
@@ -774,8 +876,59 @@ namespace SmoothServer.Net
         {
             var net = ZNet.instance;
             if (net == null) return null;
-            var peer = net.GetPeer(peerId);
-            return peer != null ? peer.m_socket as ZSteamSocket : null;
+            return SteamSocketOf(net.GetPeer(peerId));
+        }
+
+        /// <summary>
+        /// The ZSteamSocket this peer really talks through. <b>Never</b> cast ZNetPeer.m_socket
+        /// directly: with more than one ServerSync copy loaded (ours, NoVikingLeftBehind's, a
+        /// third-party mod's) the BufferingSocket a peer is given during ZNet.RPC_PeerInfo is never
+        /// unwound, so the cast is null for the whole session and the handshake can neither start
+        /// nor be answered - <see cref="SocketResolve"/> has the full story.
+        ///
+        /// Resolving here is also what keeps <see cref="States"/> consistent: the Harmony patches
+        /// fire on the inner socket (<c>ZSteamSocket.SendQueuedPackages</c> / <c>Recv</c> pass it as
+        /// <c>__instance</c>), so every other path - Get, Attach, SocketOf, the Tick sweep,
+        /// DisconnectPrefix - must key on that same instance and not on the wrapper in front of it.
+        /// </summary>
+        private static ZSteamSocket SteamSocketOf(ZNetPeer peer)
+        {
+            return peer == null ? null : SteamSocketOf(peer.m_socket);
+        }
+
+        private static ZSteamSocket SteamSocketOf(ISocket sock)
+        {
+            if (sock == null) return null;
+            var zs = SocketResolve.ResolveSteamSocket(sock);
+            if (zs == null) NoteNoSteamSocket(sock);
+            else if (!ReferenceEquals(zs, sock)) NoteWrappedSocket(sock);
+            return zs;
+        }
+
+        /// <summary>Host name of a socket, for a log line; never throws.</summary>
+        private static string HostOf(ISocket sock)
+        {
+            try { return sock.GetHostName() ?? "?"; }
+            catch { return "?"; }
+        }
+
+        /// <summary>One line per peer the first time a decorator had to be unwrapped.</summary>
+        private static void NoteWrappedSocket(ISocket sock)
+        {
+            string kind = sock.GetType().Name;
+            if (!WrapNoted.Add(kind + "@" + HostOf(sock))) return;
+            Log.LogInfo("[Compression] peer socket wrapped by " + kind +
+                        ", using the ZSteamSocket behind it");
+        }
+
+        /// <summary>One line per peer whose socket hides no ZSteamSocket at all.</summary>
+        private static void NoteNoSteamSocket(ISocket sock)
+        {
+            string kind = sock.GetType().Name;
+            string host = HostOf(sock);
+            if (!WrapNoted.Add("none:" + kind + "@" + host)) return;
+            Log.LogInfo("[Compression] peer '" + host + "' socket is " + kind +
+                        " with no ZSteamSocket behind it - staying plain");
         }
 
         /// <summary>
@@ -997,7 +1150,7 @@ namespace SmoothServer.Net
         {
             if (!Active2 || !_codecsReady) return;
             var net = ZNet.instance;
-            if (net == null) { if (States.Count > 0) { States.Clear(); FramedPeers = 0; } return; }
+            if (net == null) { if (States.Count > 0) { States.Clear(); WrapNoted.Clear(); FramedPeers = 0; } return; }
             if (ZRoutedRpc.instance == null) return;
             TryRegisterRpcs();
             if (!_rpcsRegistered) return;
@@ -1012,7 +1165,7 @@ namespace SmoothServer.Net
                 {
                     foreach (var peer in net.GetConnectedPeers())
                     {
-                        var sock = peer.m_socket as ZSteamSocket;
+                        var sock = SteamSocketOf(peer);
                         if (sock == null) continue;
                         // A ZNetPeer is in ZNet.m_peers from the moment its socket connects, but
                         // its uid stays 0 until RPC_PeerInfo completes - and the first tick after

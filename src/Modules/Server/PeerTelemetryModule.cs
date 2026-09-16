@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 using BepInEx.Configuration;
 using Steamworks;
 using UnityEngine;
@@ -47,8 +46,8 @@ namespace SmoothServer
     /// works - the decorator forwards to <c>Original</c> - which is why socketQueue and zdos
     /// looked healthy while every Steam number was zero.
     ///
-    /// So we no longer cast: <see cref="ResolveSteamSocket"/> walks the decorator chain to the
-    /// real ZSteamSocket, and every failure now says so in the log exactly once, per
+    /// So we no longer cast: <see cref="SocketResolve.ResolveSteamSocket"/> walks the decorator
+    /// chain to the real ZSteamSocket, and every failure now says so in the log exactly once, per
     /// <see cref="NoteStatusFailure"/> / <see cref="NoteNoSteamSocket"/> - a silent zero is not
     /// possible any more.
     ///
@@ -161,68 +160,6 @@ namespace SmoothServer
             return a;
         }
 
-        // ---- socket resolution -----------------------------------------------------------
-
-        private static readonly Dictionary<Type, FieldInfo> InnerFieldCache = new Dictionary<Type, FieldInfo>();
-
-        /// <summary>
-        /// The real <see cref="ZSteamSocket"/> behind a peer's ISocket, unwrapping any decorator
-        /// sockets in front of it (ServerSync's BufferingSocket and friends: they hold the socket
-        /// they wrap in a field called <c>Original</c> and forward every ISocket call to it).
-        /// Returns null when there is no Steam socket in the chain - e.g. a genuine PlayFab peer.
-        /// </summary>
-        internal static ZSteamSocket ResolveSteamSocket(ISocket sock)
-        {
-            for (int depth = 0; sock != null && depth < 8; depth++)
-            {
-                var zs = sock as ZSteamSocket;
-                if (zs != null) return zs;
-                var inner = InnerSocket(sock);
-                if (inner == null || ReferenceEquals(inner, sock)) return null;
-                sock = inner;
-            }
-            return null;
-        }
-
-        /// <summary>The ISocket a decorator wraps, or null. One reflection pass per socket type.</summary>
-        private static ISocket InnerSocket(ISocket sock)
-        {
-            var t = sock.GetType();
-            FieldInfo f;
-            if (!InnerFieldCache.TryGetValue(t, out f))
-            {
-                f = FindInnerField(t);
-                InnerFieldCache[t] = f;
-            }
-            if (f == null) return null;
-            try { return f.GetValue(sock) as ISocket; }
-            catch { return null; }
-        }
-
-        private static FieldInfo FindInnerField(Type t)
-        {
-            const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Public |
-                                       BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-            for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
-            {
-                FieldInfo any = null;
-                FieldInfo[] fields;
-                try { fields = cur.GetFields(Flags); }
-                catch { continue; }
-
-                for (int i = 0; i < fields.Length; i++)
-                {
-                    if (!typeof(ISocket).IsAssignableFrom(fields[i].FieldType)) continue;
-                    // ServerSync calls it "Original"; prefer that over any other ISocket field.
-                    if (fields[i].Name.IndexOf("Original", StringComparison.OrdinalIgnoreCase) >= 0)
-                        return fields[i];
-                    if (any == null) any = fields[i];
-                }
-                if (any != null) return any;
-            }
-            return null;
-        }
-
         // ---- polling -------------------------------------------------------------------
 
         internal static void Tick(float dt)
@@ -276,7 +213,7 @@ namespace SmoothServer
                     catch { stat.SocketQueueBytes = -1; }
                 }
 
-                var zs = ResolveSteamSocket(sock);
+                var zs = SocketResolve.ResolveSteamSocket(sock);
                 if (zs == null)
                 {
                     NoteNoSteamSocket(stat);

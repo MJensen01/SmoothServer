@@ -42,6 +42,15 @@ uncompressed.
   ready, and both sides log the handshake.
 * New machine-local `[Compression] SelfTest` (default off): runs the two-peer handshake through an
   in-process simulation at load and logs a PASS/FAIL line per case.
+* **Both the compression handshake and PeerTelemetry now look through ServerSync's `BufferingSocket`
+  wrapper; on servers running several ServerSync-based mods the peer socket stayed wrapped for the
+  whole session, so neither could see the Steam socket.** `SocketOf` returned null, `OnCaps` bailed
+  out, and compression could never be negotiated on a server like that no matter what both ends ran.
+  Every peer-socket lookup now resolves the real `ZSteamSocket` behind the decorator chain - the same
+  instance the `SendQueuedPackages`/`Recv` patches fire on, so the per-socket state still matches -
+  and logs it once per peer (`peer socket wrapped by <Type>, using the ZSteamSocket behind it`, or
+  `peer '<host>' socket is <Type> with no ZSteamSocket behind it - staying plain`). A fifth self-test
+  case covers it.
 
 [issue #1]: https://github.com/MJensen01/SmoothServer/issues/1
 

@@ -605,7 +605,7 @@ namespace SmoothServer
                 if (net == null) return 0;
                 var peer = net.GetPeer(uid);
                 if (peer == null) return 0;
-                return SendQueueGuardModule.DeferralsFor(PeerTelemetryModule.ResolveSteamSocket(peer.m_socket));
+                return SendQueueGuardModule.DeferralsFor(SocketResolve.ResolveSteamSocket(peer.m_socket));
             }
             catch { return 0; }
         }
