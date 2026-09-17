@@ -67,6 +67,10 @@ namespace SmoothServer
         private static readonly Dictionary<long, string> KnownPeers = new Dictionary<long, string>();
         private static readonly Dictionary<long, bool> KnownCongested = new Dictionary<long, bool>();
 
+        // ---- LagProbe ZDO churn rows (reused buffer, refilled on every record) ---------------
+        private static readonly List<LagProbeModule.ChurnEntry> ChurnRows =
+            new List<LagProbeModule.ChurnEntry>(16);
+
         // ---- compression delta tracking -----------------------------------------------------
         private static long _lastRawOut, _lastWireOut, _lastRawIn, _lastWireIn;
 
@@ -292,7 +296,55 @@ namespace SmoothServer
                     kvs.Add(Json.KV("probeLossPct", probeLoss));
                     kvs.Add(Json.KV("clientFrameMs", clientFrameMs));
                 }
+
+                // The client's own hit-registration histogram, as it last reported it (SS_LagReport,
+                // one report per client per LagProbe SummaryIntervalSec - so the same numbers repeat
+                // across the records written inside one report window; hitReportAgeSec says how old).
+                var hit = LagProbeModule.GetClientReport(s.Uid);
+                if (hit != null)
+                {
+                    kvs.Add(Json.KV("hitCount", hit.Hits));
+                    kvs.Add(Json.KV("hitP50Ms", hit.P50Ms));
+                    kvs.Add(Json.KV("hitP95Ms", hit.P95Ms));
+                    kvs.Add(Json.KV("hitMax", hit.MaxMs));
+                    kvs.Add(Json.KV("hitLate", hit.Late));
+                    kvs.Add(Json.KV("hitTimeouts", hit.Timeouts));
+                    kvs.Add(Json.KV("hitChurnPerMin", hit.ChurnPerMin));
+                    kvs.Add(Json.KV("hitReportAgeSec", Time.realtimeSinceStartup - hit.ReceivedAt));
+                    var owners = new List<string>(hit.Owners.Count);
+                    for (int o = 0; o < hit.Owners.Count; o++)
+                    {
+                        var ow = hit.Owners[o];
+                        owners.Add(Json.ObjRaw(new List<string>
+                        {
+                            Json.KV("owner", LagProbeModule.OwnerLabel(ow.Uid)),
+                            Json.KV("n", ow.N),
+                            Json.KV("avgMs", ow.AvgMs),
+                            Json.KV("maxMs", ow.MaxMs)
+                        }));
+                    }
+                    kvs.Add(Json.KVArrRaw("hitOwners", owners));
+                }
                 peersJson.Add(Json.ObjRaw(kvs));
+            }
+
+            // LagProbe's ZDO churn table: what the server is actually sending, by prefab.
+            var churnJson = new List<string>();
+            long churnTotal, churnBytes; int churnPeers;
+            bool haveChurn = LagProbeModule.TryGetChurn(LagProbeModule.ChurnTopN, ChurnRows,
+                                                        out churnTotal, out churnBytes, out churnPeers);
+            if (haveChurn)
+            {
+                for (int i = 0; i < ChurnRows.Count; i++)
+                {
+                    var c = ChurnRows[i];
+                    churnJson.Add(Json.ObjRaw(new List<string>
+                    {
+                        Json.KV("prefab", c.Prefab),
+                        Json.KV("n", c.Count),
+                        Json.KV("bytes", c.Bytes)
+                    }));
+                }
             }
 
             long rawOut = CompressionModule.RawOut, wireOut = CompressionModule.WireOut;
@@ -322,6 +374,9 @@ namespace SmoothServer
                 Json.KV("zdos", zdos), Json.KV("zdosSentPerSec", sentPerSec),
                 Json.KV("zdosRecvPerSec", recvPerSec), Json.KV("sceneObjs", sceneObjs),
                 Json.KVArrRaw("peers", peersJson),
+                Json.KVArrRaw("zdoChurnTop", churnJson),
+                Json.KV("zdoChurnTotal", churnTotal),
+                Json.KV("zdoChurnBytes", churnBytes),
                 Json.KVRaw("compression", compression)
             });
 
