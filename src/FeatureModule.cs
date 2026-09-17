@@ -48,7 +48,8 @@ namespace SmoothServer
     ///                                  becomes disabled(conflict) and a warning, not an error.
     ///
     /// Status strings in the summary: applied / disabled (config off) / disabled(side) (wrong
-    /// half) / disabled(conflict) (another mod owns the target method's IL) / FAILED(reason).
+    /// half) / disabled(conflict) (another mod owns the target method's IL) / disabled(IL mismatch)
+    /// (nobody else on the method, but its IL is not one the module recognises) / FAILED(reason).
     /// Optional: Section, DefaultEnabled, OnConfigChanged, StatusDetail, Disable.
     ///
     /// Every patch body must gate on <see cref="Active"/> plus the side gate
@@ -126,7 +127,16 @@ namespace SmoothServer
             try
             {
                 Harmony = new Harmony(guidPrefix + "." + Name);
+                Status = "applying";
                 ApplyPatches();
+                if (Status != "applying")
+                {
+                    // The module's own transpiler already settled it (disabled(conflict) /
+                    // disabled(IL mismatch)) from inside Harmony.Patch. Keep that verdict.
+                    Applied = false;
+                    Log.LogInfo("[" + Name + "] " + Status);
+                    return;
+                }
                 Applied = true;
                 Status = "applied";
                 Log.LogInfo("[" + Name + "] applied");
