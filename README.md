@@ -124,12 +124,10 @@ python scripts\package.py   # builds thunderstore/dist zip
 
 ## Versioning
 
-Currently `0.4.0` (renamed from `OrionNet` at 0.2.0; 0.3.0 added the optional client half,
-compression, the shared map and per-peer adaptive budgets; 0.3.1 fixed a server-build Steam
-interface bug in `SendQueueGuard`/`SteamRates`/`PeerTelemetry` and added `StatsLog` + the
-`tools/` analysis scripts; 0.4.0 added the `FastLink` profile, the `LowLatency` module and
-the client-side `SmoothMotion` module). See [`thunderstore/CHANGELOG.md`](thunderstore/CHANGELOG.md) for the
-full history.
+The current version is the one in the build line at the top of this README, in
+`thunderstore/manifest.json`, and on [Thunderstore](https://thunderstore.io/c/valheim/p/Nosferatu/SmoothServer/).
+See [`thunderstore/CHANGELOG.md`](thunderstore/CHANGELOG.md) for the full history, including the 0.2.0 rename
+from `OrionNet`.
 
 Name and Thunderstore namespace are **final**: package namespace/team `Nosferatu`, package
 `SmoothServer`. Both are immutable once the first version is uploaded — see
