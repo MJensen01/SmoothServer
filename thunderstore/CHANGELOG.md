@@ -36,6 +36,11 @@
   `hitReportAgeSec`/`hitOwners` into StatsLog's per-peer record, and repeats it in `ss.lag`. Reports
   from a peer that is not ready are ignored and an oversized package is dropped unread; a client
   without the mod (or on 0.5.1) simply never sends, and nothing changes for it.
+* **LagProbe is a temporary diagnostic, not a permanent feature.** It exists to measure the
+  hit-registration-latency work (`docs/HIT-LATENCY-PLAN.md`); once that fix ships and proves out,
+  `[LagProbe] Enabled` will default to `false` in the following release (still available to turn back
+  on), with removal of the ping/report RPCs entirely considered later. See
+  `docs/LAGPROBE-LIFECYCLE.md`.
 
 ## 0.5.1 (unreleased)
 
