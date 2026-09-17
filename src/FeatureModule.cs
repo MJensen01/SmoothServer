@@ -41,7 +41,14 @@ namespace SmoothServer
     ///                                  instead override Configure(ConfigFile) and bind by hand.)
     ///   override void ApplyPatches() - install patches on `Harmony`. THROW loudly on any
     ///                                  mismatch; the throw becomes FAILED(reason) in the
-    ///                                  summary and disables only this module.
+    ///                                  summary and disables only this module. Throw
+    ///                                  TranspilerConflictException (or call
+    ///                                  ILUtil.RequireSolePatcher) instead when the reason is
+    ///                                  that another MOD already transpiled the target - that
+    ///                                  becomes disabled(conflict) and a warning, not an error.
+    ///
+    /// Status strings in the summary: applied / disabled (config off) / disabled(side) (wrong
+    /// half) / disabled(conflict) (another mod owns the target method's IL) / FAILED(reason).
     /// Optional: Section, DefaultEnabled, OnConfigChanged, StatusDetail, Disable.
     ///
     /// Every patch body must gate on <see cref="Active"/> plus the side gate
@@ -127,6 +134,19 @@ namespace SmoothServer
             catch (Exception e)
             {
                 Applied = false;
+
+                // Another mod owns this method's IL already (issue #2). Not a failure of ours and
+                // not something the user broke: one warning, status disabled(conflict), and the
+                // other mod keeps its patch. Everything else stays FAILED(reason) + an error.
+                var conflict = ILUtil.FindConflict(e);
+                if (conflict != null)
+                {
+                    Status = "disabled(conflict)";
+                    Log.LogWarning(conflict.Message);
+                    Disable();
+                    return;
+                }
+
                 var msg = e.InnerException != null ? e.InnerException.Message : e.Message;
                 Status = "FAILED(" + msg + ")";
                 Log.LogError("[" + Name + "] FAILED to patch: " + e);

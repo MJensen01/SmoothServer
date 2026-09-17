@@ -223,6 +223,30 @@ namespace SmoothServer
             Modules.AddRange(found);
         }
 
+        // ---- transpiler coexistence ---------------------------------------------------------
+
+        /// <summary>
+        /// Flip a module to <c>disabled(conflict)</c> from inside its own transpiler (issue #2).
+        /// Used for the late case: a third mod patched the same method after us, Harmony re-ran
+        /// the chain, and our literals were gone from somebody else's output. We must not unpatch
+        /// from inside a transpiler, so this only records the truth - the module handed the IL
+        /// back untouched, so nothing of ours is installed.
+        /// </summary>
+        internal static void MarkConflict(string moduleName)
+        {
+            var m = Find(moduleName);
+            if (m == null) return;
+            m.Applied = false;
+            m.Status = "disabled(conflict)";
+        }
+
+        /// <summary>The discovered module with this Name, or null.</summary>
+        internal static FeatureModule Find(string moduleName)
+        {
+            foreach (var m in Modules) if (m.Name == moduleName) return m;
+            return null;
+        }
+
         // ---- config helpers ----------------------------------------------------------------
 
         internal static ConfigEntry<T> BindSynced<T>(string section, string key, T defaultValue,
