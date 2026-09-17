@@ -1,6 +1,6 @@
 # Changelog — SmoothServer
 
-## 0.5.3 (unreleased)
+## 0.5.3 (2026-09-17)
 
 Compatibility
 

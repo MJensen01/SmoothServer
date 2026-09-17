@@ -19,7 +19,7 @@ Replaces **BetterNetworking** and **ServerSideMap**; both must be uninstalled fr
 and from every client (see `thunderstore/README.md`). `SharedMap` imports an existing
 `<world>.mod.serversidemap.explored` file once on first start, so no exploration is lost.
 
-0.5.2 is built and tested against Valheim `1.0.14` (network version 40) / BepInEx `5.4.2350`.
+0.5.3 is built and tested against Valheim `1.0.14` (network version 40) / BepInEx `5.4.2350`.
 For servers held on the `default_pre1_0` branch (0.221.12) use 0.4.0.
 
 ## Install (server owners)
