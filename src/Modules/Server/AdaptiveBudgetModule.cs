@@ -100,7 +100,10 @@ namespace SmoothServer
                 "GetHighWaterBytes() calls AdaptiveBudgetModule.HighWaterFor() directly, so the " +
                 "per-peer budget already applies. true additionally swaps " +
                 "SendBudgetModule.HighWaterBytes around each ZDOMan.SendZDOs call - only useful " +
-                "if that hook call is ever removed.");
+                "if that hook call is ever removed. It is a prefix/finalizer that writes a FIELD; " +
+                "it never rewrites IL, so it can neither help nor hurt when another mod has " +
+                "transpiled ZDOMan.SendZDOs (issue #2). Either way, this module only has an " +
+                "effect while SendBudget itself is applied.");
             Watch(_floor); Watch(_ceiling); Watch(_k); Watch(_pendingBackoff);
             Watch(_smoothing); Watch(_logInterval); Watch(_callSiteSwap);
         }
@@ -142,6 +145,22 @@ namespace SmoothServer
             ReadConfig();
             Log.LogInfo("[AdaptiveBudget] floor=" + FloorBytes + "B ceiling=" + CeilingBytes +
                         "B K=" + K.ToString("F1") + " pendingBackoff=" + PendingBackoffBytes + "B");
+        }
+
+        /// <summary>
+        /// This module computes a per-peer number but applies it through SendBudget's transpiled
+        /// call site, so it is inert whenever SendBudget is not applied - including SendBudget's
+        /// new disabled(conflict) (issue #2). Say so in the summary rather than letting the
+        /// AdaptiveBudget lines imply an effect that is not reaching the game.
+        /// </summary>
+        public override string StatusDetail()
+        {
+            if (!Applied) return null;
+            var sendBudget = SmoothServerPlugin.Find(SendBudgetModule.ModuleName);
+            if (sendBudget != null && !sendBudget.Applied)
+                return "no effect: SendBudget is " + sendBudget.Status +
+                       ", so the per-peer budget has no call site in ZDOMan.SendZDOs";
+            return "apply=" + (UseCallSiteSwap ? "call-site swap" : "HighWaterFor() hook");
         }
 
         private void ReadConfig()

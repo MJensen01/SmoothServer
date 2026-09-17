@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using BepInEx.Configuration;
 using HarmonyLib;
 
@@ -17,9 +18,14 @@ namespace SmoothServer
     /// </summary>
     internal sealed class CreateBudgetModule : FeatureModule
     {
-        public override string Name => "CreateBudget";
+        internal const string ModuleName = "CreateBudget";
+        public override string Name => ModuleName;
 
         private const int VanillaMax = 10;
+
+        // Set at patch time so the static transpiler can ask Harmony who else is on the method.
+        private static MethodBase _target;
+        private static string _ownId;
 
         private ConfigEntry<int> _max;
 
@@ -50,6 +56,10 @@ namespace SmoothServer
             if (target == null)
                 throw new Exception("SmoothServer CreateBudget: ZNetScene.CreateObjects not found");
 
+            _target = target;
+            _ownId = Harmony.Id;
+            ILUtil.RequireSolePatcher(target, _ownId, ModuleName, ModuleName);
+
             Harmony.Patch(target,
                 transpiler: new HarmonyMethod(typeof(CreateBudgetModule), nameof(Transpiler)));
 
@@ -74,29 +84,50 @@ namespace SmoothServer
 
         private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
-            var list = new List<CodeInstruction>(instructions);
+            var owners = ILUtil.OtherTranspilersOn(_target, _ownId);
+            bool stoodDown;
+            var result = Rewrite(new List<CodeInstruction>(instructions), owners.Length > 0, out stoodDown);
+            if (stoodDown) ILUtil.StandDown(ModuleName, ModuleName, _target, owners);
+            else SmoothServerPlugin.Log.LogInfo("[CreateBudget] transpiler OK: 1x maxCreatedPerFrame replaced (assertion 1 passed)");
+            return result;
+        }
+
+        /// <summary>
+        /// Transpiler body, split out for ILSelfTest. Counts first, rewrites second, so the
+        /// stand-down path returns the caller's instructions untouched. See ILUtil's
+        /// "transpiler coexistence" note and issue #2.
+        /// </summary>
+        internal static List<CodeInstruction> Rewrite(List<CodeInstruction> list, bool foreignTranspiler,
+                                                      out bool stoodDown)
+        {
+            stoodDown = false;
             int matches = 0;
 
             for (int i = 0; i < list.Count; i++)
             {
                 int v;
                 if (!ILUtil.TryGetI4(list[i], out v)) continue;
-                if (v != VanillaMax) continue;
-
-                ILUtil.ReplaceWithCall(list[i], typeof(CreateBudgetModule), nameof(GetMaxCreatedPerFrame));
-                matches++;
+                if (v == VanillaMax) matches++;
             }
 
             if (matches != 1)
             {
+                if (foreignTranspiler) { stoodDown = true; return list; }
+
                 var msg = "SmoothServer CreateBudget transpiler: expected exactly 1x " + VanillaMax +
                           " in ZNetScene.CreateObjects, found " + matches +
                           " - game IL changed, refusing to patch";
-                SmoothServerPlugin.Log.LogError(msg);
                 throw new Exception(msg);
             }
 
-            SmoothServerPlugin.Log.LogInfo("[CreateBudget] transpiler OK: 1x maxCreatedPerFrame replaced (assertion 1 passed)");
+            for (int i = 0; i < list.Count; i++)
+            {
+                int v;
+                if (!ILUtil.TryGetI4(list[i], out v)) continue;
+                if (v != VanillaMax) continue;
+                ILUtil.ReplaceWithCall(list[i], typeof(CreateBudgetModule), nameof(GetMaxCreatedPerFrame));
+            }
+
             return list;
         }
     }

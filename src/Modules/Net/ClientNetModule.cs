@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -33,11 +34,17 @@ namespace SmoothServer.Net
     /// </summary>
     internal sealed class ClientNetModule : FeatureModule
     {
-        public override string Name => "ClientNet";
+        internal const string ModuleName = "ClientNet";
+        internal const string ModuleSection = "Client";
+        public override string Name => ModuleName;
         public override ModuleSide Side => ModuleSide.Client;
-        public override string Section => "Client";
+        public override string Section => ModuleSection;
 
         private const int VanillaHighWater = 10240;
+
+        // Set at patch time so the static transpiler can ask Harmony who else is on the method.
+        private static MethodBase _target;
+        private static string _ownId;
 
         private ConfigEntry<int> _highWater;
         private ConfigEntry<int> _sendRateMax;
@@ -66,6 +73,11 @@ namespace SmoothServer.Net
 
             var target = AccessTools.Method(typeof(ZDOMan), "SendZDOs");
             if (target == null) throw new Exception("SmoothServer ClientNet: ZDOMan.SendZDOs not found");
+
+            _target = target;
+            _ownId = Harmony.Id;
+            ILUtil.RequireSolePatcher(target, _ownId, ModuleName, ModuleSection);
+
             Harmony.Patch(target, transpiler: new HarmonyMethod(typeof(ClientNetModule), nameof(Transpiler)));
 
             var reg = AccessTools.Method(typeof(ZSteamSocket), "RegisterGlobalCallbacks");
@@ -111,28 +123,50 @@ namespace SmoothServer.Net
 
         private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
-            var list = new List<CodeInstruction>(instructions);
+            var owners = ILUtil.OtherTranspilersOn(_target, _ownId);
+            bool stoodDown;
+            var result = Rewrite(new List<CodeInstruction>(instructions), owners.Length > 0, out stoodDown);
+            if (stoodDown) ILUtil.StandDown(ModuleName, ModuleSection, _target, owners);
+            else SmoothServerPlugin.Log.LogInfo("[ClientNet] transpiler OK: 2x highWater replaced (assertion 2 passed)");
+            return result;
+        }
+
+        /// <summary>
+        /// Transpiler body, split out for ILSelfTest. Counts first, rewrites second, so the
+        /// stand-down path returns the caller's instructions untouched. A client profile is where
+        /// a rival networking mod is MOST likely (issue #2), so this path matters more here than
+        /// on a server.
+        /// </summary>
+        internal static List<CodeInstruction> Rewrite(List<CodeInstruction> list, bool foreignTranspiler,
+                                                      out bool stoodDown)
+        {
+            stoodDown = false;
             int hits = 0;
+            for (int i = 0; i < list.Count; i++)
+            {
+                int v;
+                if (!ILUtil.TryGetI4(list[i], out v)) continue;
+                if (v == VanillaHighWater) hits++;
+            }
+
+            if (hits != 2)
+            {
+                if (foreignTranspiler) { stoodDown = true; return list; }
+
+                var msg = "SmoothServer ClientNet transpiler: expected exactly 2x " + VanillaHighWater +
+                          " in ZDOMan.SendZDOs, found " + hits +
+                          " - game IL changed, refusing to patch";
+                throw new Exception(msg);
+            }
+
             for (int i = 0; i < list.Count; i++)
             {
                 int v;
                 if (!ILUtil.TryGetI4(list[i], out v)) continue;
                 if (v != VanillaHighWater) continue;
                 ILUtil.ReplaceWithCall(list[i], typeof(ClientNetModule), nameof(GetHighWaterBytes));
-                hits++;
             }
 
-            if (hits != 2)
-            {
-                var msg = "SmoothServer ClientNet transpiler: expected exactly 2x " + VanillaHighWater +
-                          " in ZDOMan.SendZDOs, found " + hits +
-                          " - game IL changed (or another mod patched it first), refusing to patch";
-                SmoothServerPlugin.Log.LogError(msg);
-                throw new Exception(msg);
-            }
-
-            SmoothServerPlugin.Log.LogInfo("[ClientNet] transpiler OK: " + hits +
-                                           "x highWater replaced (assertion 2 passed)");
             return list;
         }
 

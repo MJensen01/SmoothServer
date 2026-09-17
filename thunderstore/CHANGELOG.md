@@ -1,5 +1,65 @@
 # Changelog — SmoothServer
 
+## 0.5.2 (2026-09-17)
+
+* **SendBudget/CreateBudget/AdaptiveBudget/OwnershipRelease/ClientNet no longer FAIL when another mod
+  has already transpiled the same method — they log the other mod and stay off ([issue #2]).** The
+  report was `SendBudget transpiler: expected exactly 2x 10240 and 1x 2048 in ZDOMan.SendZDOs, found
+  0 and 1 — game IL changed`, on a server where every other module applied. The game IL was fine:
+  Harmony *chains* transpilers, so the second mod on a method is handed the first one's output, and
+  several networking mods rewrite exactly those two 10240 literals. Our scan could not tell that from
+  an Iron Gate change and blamed the wrong party. Each literal-swapping module now asks Harmony who
+  else is on its target before patching; if somebody is, it leaves the method alone, logs one line —
+  `[SendBudget] another mod already changed ZDOMan.SendZDOs (owners: <ids>) - SendBudget left off so
+  the two do not fight; set [SendBudget] Enabled=false to silence this` — and reports the new status
+  **`disabled(conflict)`** instead of `FAILED`. Nothing is relaxed: with no foreign transpiler on the
+  method the exact match counts are still mandatory and a real game IL change still refuses to patch,
+  loudly. AdaptiveBudget applies through SendBudget's call site, so the summary now says so when
+  SendBudget is not applied. New `ILSelfTest` module (on by default, pure data, no patches) runs the
+  transpiler bodies against synthetic IL at startup and logs one PASS/FAIL line, including the
+  "another mod got here first" case.
+* **LagProbe: session-edge filter — the multi-second "RTT" spikes were not latency.** The first real
+  data from 0.5.1 put every 1–5 s round trip at exactly one of two moments: a player joining (the
+  client's main thread is loading the world and answers nothing) or leaving (it is saving and
+  quitting). Both are now dropped whole. Any probe sent within the new `[LagProbe] EdgeIgnoreSec`
+  (30 s, machine-local) of a peer becoming ready, and every probe once the server knows the peer is
+  going away (`ZNet.Disconnect`, or a socket already reporting disconnected), never touches
+  RTT/EMA/jitter and is never charged as loss when it goes unanswered — the per-peer summary line
+  counts them separately as `edgeDropped=N`. The line also carries the peer's session age
+  (`age=Ns`) and, while a session is inside a window, `joining (Ns of edge window left)` or
+  `leaving`. A peer that has never answered a single post-edge ping now prints
+  `client-mod=none (N sent, 0 answered)` instead of `loss=100%`: an old or missing client half is
+  not packet loss, and the `[PeerTelemetry]` line says the same.
+* **LagProbe: ZDO churn by prefab — "what generates the traffic?"** 140–160 kB/s and ~800 ZDO
+  updates/s to each player near the base was the symptom; this names the cause. A prefix/finalizer
+  pair on `ZDOMan.SendZDOs(ZDOPeer, bool)` — the single funnel every outgoing ZDOData package goes
+  through, vanilla's round robin, `SendAllZDOs` and SendCadence's own sweep alike, so nothing can be
+  double counted — opens a window in which a postfix on `ZDO.Serialize(ZPackage)` counts one update
+  against the ZDO's prefab hash and adds the bytes just written plus vanilla's fixed 42-byte per-ZDO
+  header. Every `SummaryIntervalSec` the server prints `[LagProbe] zdo churn 60s: total=N updates
+  (B kB) to P peers; top: <prefab>=n (x%), …`, StatsLog's record gains `zdoChurnTop` /
+  `zdoChurnTotal` / `zdoChurnBytes`, and `ss.lag churn` / `ss.lag churn reset` print the top 25 and
+  clear the table on demand. New `[LagProbe] ChurnEnabled` (true) and `ChurnTopN` (10), both
+  machine-local. Off the send path the postfix is a single bool read, so the autosave's own
+  serialisation costs nothing, and a background thread is ignored outright.
+* **LagProbe: client hit reports reach the server (`SS_LagReport`).** The hit-registration histogram
+  is measured on the client, where nobody reads a log. Every `SummaryIntervalSec` the client half
+  now sends its own summary to the server as one small routed RPC — hits, p50/p95/max, late,
+  timeouts, ownership churn per minute, the client's frame-time p50 and up to 8 owners — and the
+  server logs one line per client per interval (`[LagProbe] client 'Name' 60s: hits=… p50=…ms
+  p95=…ms max=…ms late=… timeouts=… churn=…/min cfps=… | owners: 'Name' n=… avg=…ms max=…ms, …`),
+  writes `hitCount`/`hitP50Ms`/`hitP95Ms`/`hitMax`/`hitLate`/`hitTimeouts`/`hitChurnPerMin`/
+  `hitReportAgeSec`/`hitOwners` into StatsLog's per-peer record, and repeats it in `ss.lag`. Reports
+  from a peer that is not ready are ignored and an oversized package is dropped unread; a client
+  without the mod (or on 0.5.1) simply never sends, and nothing changes for it.
+* **LagProbe is a temporary diagnostic, not a permanent feature.** It exists to measure the
+  hit-registration-latency work (`docs/HIT-LATENCY-PLAN.md`); once that fix ships and proves out,
+  `[LagProbe] Enabled` will default to `false` in the following release (still available to turn back
+  on), with removal of the ping/report RPCs entirely considered later. See
+  `docs/LAGPROBE-LIFECYCLE.md`.
+
+[issue #2]: https://github.com/MJensen01/SmoothServer/issues/2
+
 ## 0.5.1 (unreleased)
 
 * **PeerTelemetry read zeros on dedicated servers, so AdaptiveBudget never adapted — fixed.** Every
