@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Reflection.Emit;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -68,7 +69,12 @@ namespace SmoothServer
     /// </summary>
     internal sealed class SmoothMotionModule : FeatureModule
     {
-        public override string Name => "SmoothMotion";
+        internal const string ModuleName = "SmoothMotion";
+        public override string Name => ModuleName;
+
+        // Set at patch time so the static transpiler can ask Harmony who else is on the method.
+        private static MethodBase _target;
+        private static string _ownId;
         public override ModuleSide Side => ModuleSide.Client;
         public override bool DefaultEnabled => false;
 
@@ -135,6 +141,12 @@ namespace SmoothServer
                 throw new Exception("SmoothServer SmoothMotion: ZSyncTransform.SyncPosition signature " +
                                     "changed (expected (ZDO, float, out bool), got " + pars.Length +
                                     " params) - refusing to patch");
+
+            // ZSyncTransform.SyncPosition is a popular target - if another mod already transpiles
+            // it, stand down instead of fighting over the same two literals (issue #2).
+            _target = target;
+            _ownId = Harmony.Id;
+            ILUtil.RequireSolePatcher(target, _ownId, ModuleName, ModuleName);
 
             Harmony.Patch(target, transpiler: new HarmonyMethod(typeof(SmoothMotionModule), nameof(Transpiler)));
 
@@ -207,8 +219,43 @@ namespace SmoothServer
 
         private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
-            var list = new List<CodeInstruction>(instructions);
+            var owners = ILUtil.OtherTranspilersOn(_target, _ownId);
+            bool stoodDown;
+            var result = Rewrite(new List<CodeInstruction>(instructions), owners.Length > 0, out stoodDown);
+            if (stoodDown) ILUtil.StandDown(ModuleName, ModuleName, _target, owners);
+            else SmoothServerPlugin.Log.LogInfo("[SmoothMotion] transpiler OK: 2x lerp factor + 2x extrapolation cap replaced (assertion 2+2 passed)");
+            return result;
+        }
+
+        /// <summary>
+        /// Transpiler body, split out for ILSelfTest. Counts first, rewrites second, so the
+        /// stand-down path returns the caller's instructions untouched (issue #2).
+        /// </summary>
+        internal static List<CodeInstruction> Rewrite(List<CodeInstruction> list, bool foreignTranspiler,
+                                                      out bool stoodDown)
+        {
+            stoodDown = false;
             int lerps = 0, caps = 0;
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                float v;
+                if (!ILUtil.TryGetR4(list[i], out v)) continue;
+                if (Mathf.Approximately(v, VanillaLerp)) lerps++;
+                else if (Mathf.Approximately(v, VanillaExtrapolationSeconds)) caps++;
+            }
+
+            // SyncPosition has two copies of the maths - the parented ("standing on a ship")
+            // branch and the free branch - so each literal appears exactly twice.
+            if (lerps != 2 || caps != 2)
+            {
+                if (foreignTranspiler) { stoodDown = true; return list; }
+
+                var msg = "SmoothServer SmoothMotion transpiler: expected exactly 2x " + VanillaLerp +
+                          " and 2x " + VanillaExtrapolationSeconds + " in ZSyncTransform.SyncPosition, found " +
+                          lerps + " and " + caps + " - game IL changed, refusing to patch";
+                throw new Exception(msg);
+            }
 
             // Walk backwards: each replacement inserts a `ldarg.0` before the literal, so going
             // backwards keeps the indices of everything not yet visited valid.
@@ -218,31 +265,11 @@ namespace SmoothServer
                 if (!ILUtil.TryGetR4(list[i], out v)) continue;
 
                 if (Mathf.Approximately(v, VanillaLerp))
-                {
                     ILUtil.ReplaceWithThisCall(list, i, typeof(SmoothMotionModule), nameof(GetLerpFactor));
-                    lerps++;
-                }
                 else if (Mathf.Approximately(v, VanillaExtrapolationSeconds))
-                {
                     ILUtil.ReplaceWithThisCall(list, i, typeof(SmoothMotionModule), nameof(GetExtrapolationSeconds));
-                    caps++;
-                }
             }
 
-            // SyncPosition has two copies of the maths - the parented ("standing on a ship")
-            // branch and the free branch - so each literal appears exactly twice.
-            if (lerps != 2 || caps != 2)
-            {
-                var msg = "SmoothServer SmoothMotion transpiler: expected exactly 2x " + VanillaLerp +
-                          " and 2x " + VanillaExtrapolationSeconds + " in ZSyncTransform.SyncPosition, found " +
-                          lerps + " and " + caps + " - game IL changed (or another mod patched it " +
-                          "first), refusing to patch";
-                SmoothServerPlugin.Log.LogError(msg);
-                throw new Exception(msg);
-            }
-
-            SmoothServerPlugin.Log.LogInfo("[SmoothMotion] transpiler OK: 2x lerp factor + 2x " +
-                                           "extrapolation cap replaced (assertion 2+2 passed)");
             return list;
         }
     }

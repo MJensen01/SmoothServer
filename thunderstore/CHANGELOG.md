@@ -1,5 +1,26 @@
 # Changelog — SmoothServer
 
+## 0.5.2 (unreleased)
+
+* **SendBudget/CreateBudget/AdaptiveBudget/OwnershipRelease/ClientNet no longer FAIL when another mod
+  has already transpiled the same method — they log the other mod and stay off ([issue #2]).** The
+  report was `SendBudget transpiler: expected exactly 2x 10240 and 1x 2048 in ZDOMan.SendZDOs, found
+  0 and 1 — game IL changed`, on a server where every other module applied. The game IL was fine:
+  Harmony *chains* transpilers, so the second mod on a method is handed the first one's output, and
+  several networking mods rewrite exactly those two 10240 literals. Our scan could not tell that from
+  an Iron Gate change and blamed the wrong party. Each literal-swapping module now asks Harmony who
+  else is on its target before patching; if somebody is, it leaves the method alone, logs one line —
+  `[SendBudget] another mod already changed ZDOMan.SendZDOs (owners: <ids>) - SendBudget left off so
+  the two do not fight; set [SendBudget] Enabled=false to silence this` — and reports the new status
+  **`disabled(conflict)`** instead of `FAILED`. Nothing is relaxed: with no foreign transpiler on the
+  method the exact match counts are still mandatory and a real game IL change still refuses to patch,
+  loudly. AdaptiveBudget applies through SendBudget's call site, so the summary now says so when
+  SendBudget is not applied. New `ILSelfTest` module (on by default, pure data, no patches) runs the
+  transpiler bodies against synthetic IL at startup and logs one PASS/FAIL line, including the
+  "another mod got here first" case.
+
+[issue #2]: https://github.com/MJensen01/SmoothServer/issues/2
+
 ## 0.5.1 (unreleased)
 
 * **PeerTelemetry read zeros on dedicated servers, so AdaptiveBudget never adapted — fixed.** Every
