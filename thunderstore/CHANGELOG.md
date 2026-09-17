@@ -1,5 +1,24 @@
 # Changelog — SmoothServer
 
+## 0.5.3 (2026-09-17)
+
+Compatibility
+
+* **SendBudget now works on a hex-patched `assembly_valheim.dll`** ([issue #2](https://github.com/MJensen01/SmoothServer/issues/2),
+  part two). Some hosts and old "network fix" guides raise the game's 10240-byte per-peer send-queue literal in
+  `ZDOMan.SendZDOs` by editing the DLL (the reporter's G-Portal file was byte-for-byte Steam's 1.0.14 except those two
+  operands, 10240 → 30720). SendBudget's strict "exactly 2x 10240" check refused such a binary and the whole Harmony
+  patch failed. The transpiler now recognises that shape - two identical raised literals plus the untouched 2048 and
+  nothing else - takes it over exactly like vanilla, and names the value it found in the log and the module summary
+  (`binary literal 30720`). `[SendBudget] HighWaterBytes` then applies as configured.
+* **IL the module does not recognise is no longer a failure.** With no other mod on the method, an unexpected
+  `ZDOMan.SendZDOs` used to throw out of the transpiler (a wall of stack trace, `FAILED(IL Compile Error)`). It now hands
+  the method back untouched, reports `disabled(IL mismatch)`, and logs one block with every int literal it saw, the
+  instruction count, the game version, and the game assembly's MVID, size, modified date and md5 - enough to answer a
+  report from the log alone. Everything else keeps running. `disabled(conflict)` (another mod owns the method) is unchanged.
+* ILSelfTest: 5 new cases (both take-over values, the two shapes that must not be taken over, the foreign-transpiler
+  variant; the old "unrecognised IL throws" case is now "unrecognised IL is a clean mismatch") - 12 cases total, silent.
+
 ## 0.5.2 (2026-09-17)
 
 * **SendBudget/CreateBudget/AdaptiveBudget/OwnershipRelease/ClientNet no longer FAIL when another mod

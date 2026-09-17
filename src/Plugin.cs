@@ -28,7 +28,7 @@ namespace SmoothServer
     {
         public const string PluginGuid = "Nosferatu.SmoothServer";
         public const string PluginName = "SmoothServer";
-        public const string PluginVersion = "0.5.2";
+        public const string PluginVersion = "0.5.3";
 
         internal static ManualLogSource Log;
         internal static ConfigFile Cfg;
@@ -234,10 +234,20 @@ namespace SmoothServer
         /// </summary>
         internal static void MarkConflict(string moduleName)
         {
+            MarkStatus(moduleName, "disabled(conflict)");
+        }
+
+        /// <summary>
+        /// Flip a module to a non-applied status from inside its own transpiler (Harmony runs
+        /// transpilers inside Harmony.Patch, and again whenever another mod patches the same
+        /// method later, so this is the only place that knows).
+        /// </summary>
+        internal static void MarkStatus(string moduleName, string status)
+        {
             var m = Find(moduleName);
             if (m == null) return;
             m.Applied = false;
-            m.Status = "disabled(conflict)";
+            m.Status = status;
         }
 
         /// <summary>The discovered module with this Name, or null.</summary>

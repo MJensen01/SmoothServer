@@ -23,6 +23,17 @@ namespace SmoothServer
     /// ZDOMan.SendZDOs we leave the method entirely alone and report disabled(conflict); with no
     /// foreign transpiler the strict 2/1 assertion is unchanged and still refuses to patch.
     ///
+    /// Since 0.5.3 (issue #2, part two) a binary whose two high-water literals were already
+    /// raised - the host's assembly_valheim.dll hex-patched by one of the old "network fix"
+    /// guides (10240 -> 30720 is the common one; the reporter's file was byte-for-byte Steam's
+    /// 1.0.14 except those two operands) - is recognised and taken over: the raised value is
+    /// swapped for our call exactly like vanilla's, remembered in DetectedVanillaHighWater and
+    /// named in the log and the module summary. IL that is neither vanilla nor that shape, with
+    /// nobody else on the method, no longer throws out of the transpiler (which failed the
+    /// whole Harmony patch and printed a wall of stack): the method is handed back untouched,
+    /// the module reports disabled(IL mismatch), and one error block lists every int literal it
+    /// saw plus the game version, assembly MVID, size and md5 so the report can be answered.
+    ///
     /// GetHighWaterBytes()/GetMinChunkBytes() are invoked fresh from the patched IL on every
     /// call, but they read the static HighWaterBytes/MinChunkBytes fields rather than the
     /// ConfigEntry directly (a transpiled IL call target must be a plain static method with no
@@ -93,8 +104,16 @@ namespace SmoothServer
             Harmony.Patch(target,
                 transpiler: new HarmonyMethod(typeof(SendBudgetModule), nameof(Transpiler)));
 
+            if (Status == "disabled(IL mismatch)")
+            {
+                // The transpiler ran inside Harmony.Patch and found IL it does not know; it has
+                // already logged the dump and left the method untouched. Not a failure of ours.
+                Active = false;
+                return;
+            }
             Active = true;
-            Log.LogInfo("[SendBudget] highWater=" + HighWaterBytes + "B minChunk=" + MinChunkBytes + "B");
+            Log.LogInfo("[SendBudget] highWater=" + HighWaterBytes + "B minChunk=" + MinChunkBytes +
+                        "B (binary literal " + DetectedVanillaHighWater + ")");
         }
 
         public override void Disable()
@@ -112,68 +131,212 @@ namespace SmoothServer
             Log.LogInfo("[SendBudget] highWater=" + HighWaterBytes + "B minChunk=" + MinChunkBytes + "B");
         }
 
+        /// <summary>What <see cref="Rewrite"/> did with the instruction list it was given.</summary>
+        internal enum Outcome
+        {
+            /// <summary>Both high-water loads and the min-chunk load were swapped for our calls.</summary>
+            Rewritten,
+            /// <summary>Another mod's transpiler owns the method and its numbers are in it: left untouched, disabled(conflict).</summary>
+            StoodDown,
+            /// <summary>Nobody else is on the method and the IL is still not one we recognise: left untouched, disabled(IL mismatch).</summary>
+            Mismatch
+        }
+
+        /// <summary>
+        /// The high-water literal this game binary actually carries in ZDOMan.SendZDOs. 10240 on
+        /// every build Iron Gate has shipped; something else (30720, 61440...) when the host's
+        /// assembly_valheim.dll was hex-patched by one of the old "network fix" guides. Set by the
+        /// transpiler; read by the status line so the summary names it.
+        /// </summary>
+        internal static int DetectedVanillaHighWater = VanillaHighWater;
+
+        /// <summary>One line for the module summary: what the transpiler found, when it was not plain vanilla.</summary>
+        internal static string Detail;
+
+        private static bool _prepatchedLogged;
+
+        /// <summary>ILSelfTest runs Rewrite() on synthetic lists at startup; while set, nothing is logged and the log-once flag is untouched.</summary>
+        internal static bool Quiet;
+
+        public override string StatusDetail() { return Detail; }
+
         private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
         {
-            var owners = ILUtil.OtherTranspilersOn(_target, _ownId);
-            bool stoodDown;
-            var result = Rewrite(new List<CodeInstruction>(instructions), owners.Length > 0, out stoodDown);
-            if (stoodDown) ILUtil.StandDown(ModuleName, ModuleName, _target, owners);
-            else SmoothServerPlugin.Log.LogInfo("[SendBudget] transpiler OK: 2x highWater, 1x minChunk replaced (assertion 2/1 passed)");
-            return result;
+            var list = new List<CodeInstruction>(instructions);
+            try
+            {
+                var owners = ILUtil.OtherTranspilersOn(_target, _ownId);
+                Outcome outcome;
+                var result = Rewrite(list, owners.Length > 0, out outcome);
+                switch (outcome)
+                {
+                    case Outcome.StoodDown:
+                        ILUtil.StandDown(ModuleName, ModuleName, _target, owners);
+                        break;
+                    case Outcome.Mismatch:
+                        MarkMismatch();
+                        break;
+                    default:
+                        SmoothServerPlugin.Log.LogInfo("[SendBudget] transpiler OK: 2x highWater (binary literal " +
+                                                       DetectedVanillaHighWater + "), 1x minChunk replaced (assertion 2/1 passed)");
+                        break;
+                }
+                return result;
+            }
+            catch (Exception e)
+            {
+                // A transpiler that throws takes the whole Harmony patch down with a wall of
+                // stack trace and the module ends up FAILED. Nothing in here is worth that:
+                // hand vanilla's instructions back untouched and say why.
+                Detail = "transpiler threw: " + e.Message;
+                SmoothServerPlugin.Log.LogError("[SendBudget] transpiler threw, leaving ZDOMan.SendZDOs untouched: " + e);
+                MarkMismatch();
+                return list;
+            }
+        }
+
+        private static void MarkMismatch()
+        {
+            Active = false;
+            SmoothServerPlugin.MarkStatus(ModuleName, "disabled(IL mismatch)");
         }
 
         /// <summary>
         /// The transpiler body, separated from Harmony so ILSelfTest can run it on a synthetic
-        /// instruction list. COUNTS first and only rewrites once the counts are right, so the
-        /// stand-down path can hand the caller's own instructions back byte-for-byte untouched -
-        /// the other mod's rewrite must survive intact.
+        /// instruction list. COUNTS first and only rewrites once it knows what it is looking at,
+        /// so every non-rewrite path hands the caller's own list back byte-for-byte untouched -
+        /// on the stand-down path the other mod's rewrite must survive intact.
         ///
-        /// foreignTranspiler = another mod has a transpiler on this method. It is the ONLY thing
-        /// that turns the hard assertion into a quiet stand-down; on unmodified IL the 2/1 match
-        /// is still mandatory.
+        /// Three shapes are recognised:
+        ///   vanilla      2x 10240 + 1x 2048               -> rewritten (the normal case)
+        ///   pre-patched  2x V + 1x 2048, nothing else, V > 2048 and V != 10240
+        ///                                                  -> rewritten, V remembered and logged
+        ///                (issue #2: a host's assembly_valheim.dll hex-patched by an old "network
+        ///                fix" guide - byte-for-byte Steam's build except the two 10240 operands)
+        ///   anything else, with another mod's transpiler on the method -> StoodDown
+        ///   anything else, nobody else on the method      -> Mismatch, with a dump of what we saw
+        /// Never throws for an IL shape; the Harmony wrapper above catches anything unexpected.
         /// </summary>
         internal static List<CodeInstruction> Rewrite(List<CodeInstruction> list, bool foreignTranspiler,
-                                                      out bool stoodDown)
+                                                      out Outcome outcome)
         {
-            stoodDown = false;
             int hiMatches = 0, minMatches = 0;
-
+            var others = new Dictionary<int, int>();     // literal value -> occurrences
+            var literals = new List<string>();           // "ldc.i4 30720@3" for the dump
             for (int i = 0; i < list.Count; i++)
             {
                 int v;
                 if (!ILUtil.TryGetI4(list[i], out v)) continue;
+                literals.Add(list[i].opcode + " " + v + "@" + i);
                 if (v == VanillaHighWater) hiMatches++;
                 else if (v == VanillaMinChunk) minMatches++;
+                else
+                {
+                    int n;
+                    others.TryGetValue(v, out n);
+                    others[v] = n + 1;
+                }
             }
 
-            if (hiMatches != 2 || minMatches != 1)
+            int highWater = VanillaHighWater;
+            if (hiMatches == 2 && minMatches == 1)
             {
-                if (foreignTranspiler)
+                // Vanilla. Unchanged since 0.1: other literals in the method are none of our business.
+            }
+            else if (foreignTranspiler)
+            {
+                outcome = Outcome.StoodDown;
+                return list;
+            }
+            else if (hiMatches == 0 && minMatches == 1 && others.Count == 1)
+            {
+                int v = 0, n = 0;
+                foreach (var kv in others) { v = kv.Key; n = kv.Value; }
+                if (n == 2 && v > VanillaMinChunk)
                 {
-                    // Somebody else's numbers are in this method now. Leave every instruction as
-                    // we received it and let the caller report the conflict.
-                    stoodDown = true;
+                    highWater = v;
+                }
+                else
+                {
+                    outcome = Outcome.Mismatch;
+                    ReportMismatch(hiMatches, minMatches, literals, list.Count);
                     return list;
                 }
-
-                var msg = "SmoothServer SendBudget transpiler: expected exactly 2x " + VanillaHighWater +
-                          " and 1x " + VanillaMinChunk + " in ZDOMan.SendZDOs, found " +
-                          hiMatches + " and " + minMatches +
-                          " - game IL changed, refusing to patch";
-                throw new Exception(msg);
+            }
+            else
+            {
+                outcome = Outcome.Mismatch;
+                ReportMismatch(hiMatches, minMatches, literals, list.Count);
+                return list;
             }
 
             for (int i = 0; i < list.Count; i++)
             {
                 int v;
                 if (!ILUtil.TryGetI4(list[i], out v)) continue;
-                if (v == VanillaHighWater)
+                if (v == highWater)
                     ILUtil.ReplaceWithCall(list[i], typeof(SendBudgetModule), nameof(GetHighWaterBytes));
                 else if (v == VanillaMinChunk)
                     ILUtil.ReplaceWithCall(list[i], typeof(SendBudgetModule), nameof(GetMinChunkBytes));
             }
 
+            DetectedVanillaHighWater = highWater;
+            if (highWater != VanillaHighWater)
+            {
+                Detail = "binary's send-queue high-water literal is " + highWater + " (vanilla 10240; hex-patched assembly_valheim.dll) - taken over";
+                if (!_prepatchedLogged && !Quiet)
+                {
+                    _prepatchedLogged = true;
+                    SmoothServerPlugin.Log.LogWarning("[SendBudget] this game binary's send-queue high-water literal is " + highWater +
+                        ", not vanilla's 10240 - assembly_valheim.dll was hex-patched (the old \"network fix\"?). " +
+                        "Taking it over: [SendBudget] HighWaterBytes=" + HighWaterBytes + " applies from here on, the patched value no longer matters");
+                }
+            }
+            else Detail = null;
+
+            outcome = Outcome.Rewritten;
             return list;
+        }
+
+        private static void ReportMismatch(int hi, int min, List<string> literals, int count)
+        {
+            Detail = "found " + hi + "x 10240 and " + min + "x 2048 in ZDOMan.SendZDOs (" + count + " instructions; literals: " +
+                     (literals.Count == 0 ? "none" : string.Join(", ", literals.ToArray())) + ")";
+            if (Quiet) return;
+            SmoothServerPlugin.Log.LogError("[SendBudget] ZDOMan.SendZDOs is not IL this version knows: expected 2x " + VanillaHighWater +
+                " and 1x " + VanillaMinChunk + " (or 2x one raised value and 1x " + VanillaMinChunk + "), " + Detail +
+                ". SendBudget left off (disabled(IL mismatch)); everything else keeps running. " +
+                "Please paste this block into a GitHub issue. " + DescribeGameAssembly());
+        }
+
+        /// <summary>Which assembly_valheim.dll this is, for the mismatch report. Never throws.</summary>
+        internal static string DescribeGameAssembly()
+        {
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                var asm = typeof(ZDOMan).Assembly;
+                sb.Append("game ");
+                try { sb.Append(Version.GetVersionString()); } catch { sb.Append("(version n/a)"); }
+                sb.Append("; assembly_valheim mvid=").Append(asm.ManifestModule.ModuleVersionId);
+                string path = null;
+                try { path = asm.Location; } catch { }
+                if (!string.IsNullOrEmpty(path) && System.IO.File.Exists(path))
+                {
+                    var fi = new System.IO.FileInfo(path);
+                    sb.Append(" size=").Append(fi.Length).Append("B modified=").Append(fi.LastWriteTimeUtc.ToString("u"));
+                    try
+                    {
+                        using (var md5 = System.Security.Cryptography.MD5.Create())
+                        using (var fs = System.IO.File.OpenRead(path))
+                            sb.Append(" md5=").Append(BitConverter.ToString(md5.ComputeHash(fs)).Replace("-", "").ToLowerInvariant());
+                    }
+                    catch (Exception e) { sb.Append(" md5=(").Append(e.GetType().Name).Append(")"); }
+                }
+                else sb.Append(" (no file location)");
+            }
+            catch (Exception e) { sb.Append("(describe failed: ").Append(e.Message).Append(")"); }
+            return sb.ToString();
         }
     }
 }

@@ -67,7 +67,7 @@ If another owner is, the module installs nothing, logs one line —
 SendBudget left off so the two do not fight; set [SendBudget] Enabled=false to silence this
 ```
 
-— and reports the status **`disabled(conflict)`** in the module summary (alongside `applied`,
+— and reports the status **`disabled(conflict)`** in the module summary (alongside `applied`, `disabled(IL mismatch)` (0.5.3: nobody else on the method, but its IL is not one SendBudget recognises),
 `disabled`, `disabled(side)` and `FAILED(reason)`). The other mod keeps its patch and its settings;
 ours simply stays out of the way, and every other SmoothServer module is unaffected. The same guard
 runs inside the transpiler itself for the late case — a third mod patching the method *after* us,

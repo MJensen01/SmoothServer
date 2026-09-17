@@ -44,35 +44,39 @@ namespace SmoothServer
             var fails = new List<string>();
             int cases = 0;
 
+            SendBudgetModule.Quiet = true;   // synthetic lists: no error/warning lines, no log-once flag consumed
             try
             {
                 // --- 1. the reporter's case: another mod took both 10240s, the 2048 remains ----
                 cases++;
                 var mangled = ForeignRewriteOfSendZDOs();
                 var before = Snapshot(mangled);
-                bool stoodDown;
-                var after = SendBudgetModule.Rewrite(mangled, true, out stoodDown);
-                if (!stoodDown) fails.Add("SendBudget: foreign IL did not report a conflict");
+                SendBudgetModule.Outcome o1;
+                var after = SendBudgetModule.Rewrite(mangled, true, out o1);
+                if (o1 != SendBudgetModule.Outcome.StoodDown) fails.Add("SendBudget: foreign IL did not report a conflict");
                 if (!ReferenceEquals(after, mangled)) fails.Add("SendBudget: conflict path returned a different list");
                 if (!Same(before, Snapshot(after)))
                     fails.Add("SendBudget: conflict path MODIFIED the other mod's IL");
 
-                // --- 2. same IL, nobody else on the method: still a hard failure --------------
+                // --- 2. same IL, nobody else on the method: IL mismatch, untouched, no throw ---
                 cases++;
                 var mangled2 = ForeignRewriteOfSendZDOs();
-                string thrown = null;
-                try { bool sd; SendBudgetModule.Rewrite(mangled2, false, out sd); }
-                catch (Exception e) { thrown = e.Message; }
-                if (thrown == null) fails.Add("SendBudget: unrecognised IL did not throw");
-                else if (thrown.IndexOf("found 0 and 1", StringComparison.Ordinal) < 0)
-                    fails.Add("SendBudget: wrong assertion message: " + thrown);
+                var before2 = Snapshot(mangled2);
+                SendBudgetModule.Outcome o2;
+                var after2 = SendBudgetModule.Rewrite(mangled2, false, out o2);
+                if (o2 != SendBudgetModule.Outcome.Mismatch) fails.Add("SendBudget: unrecognised IL was not reported as a mismatch (" + o2 + ")");
+                if (!ReferenceEquals(after2, mangled2) || !Same(before2, Snapshot(after2)))
+                    fails.Add("SendBudget: mismatch path MODIFIED the IL");
+                if (SendBudgetModule.Detail == null || SendBudgetModule.Detail.IndexOf("found 0x 10240 and 1x 2048", StringComparison.Ordinal) < 0)
+                    fails.Add("SendBudget: mismatch detail wrong: " + SendBudgetModule.Detail);
 
                 // --- 3. vanilla IL, nobody else: the normal 2/1 swap -------------------------
                 cases++;
                 var vanilla = VanillaSendZDOs();
-                bool sd3;
-                SendBudgetModule.Rewrite(vanilla, false, out sd3);
-                if (sd3) fails.Add("SendBudget: stood down on clean vanilla IL");
+                SendBudgetModule.Outcome o3;
+                SendBudgetModule.Rewrite(vanilla, false, out o3);
+                if (o3 != SendBudgetModule.Outcome.Rewritten) fails.Add("SendBudget: clean vanilla IL not rewritten (" + o3 + ")");
+                if (SendBudgetModule.DetectedVanillaHighWater != 10240) fails.Add("SendBudget: vanilla literal misdetected as " + SendBudgetModule.DetectedVanillaHighWater);
                 int hi = CountCalls(vanilla, typeof(SendBudgetModule), "GetHighWaterBytes");
                 int min = CountCalls(vanilla, typeof(SendBudgetModule), "GetMinChunkBytes");
                 if (hi != 2 || min != 1) fails.Add("SendBudget: swapped " + hi + "/" + min + ", wanted 2/1");
@@ -80,11 +84,61 @@ namespace SmoothServer
                 // --- 4. foreign transpiler elsewhere, our literals intact: patch anyway -------
                 cases++;
                 var vanilla2 = VanillaSendZDOs();
-                bool sd4;
-                SendBudgetModule.Rewrite(vanilla2, true, out sd4);
-                if (sd4) fails.Add("SendBudget: stood down although its literals were all present");
+                SendBudgetModule.Outcome o4;
+                SendBudgetModule.Rewrite(vanilla2, true, out o4);
+                if (o4 != SendBudgetModule.Outcome.Rewritten) fails.Add("SendBudget: stood down although its literals were all present");
                 if (CountCalls(vanilla2, typeof(SendBudgetModule), "GetHighWaterBytes") != 2)
                     fails.Add("SendBudget: did not patch with a foreign transpiler present");
+
+                // --- 4b. hex-patched binary (issue #2, the G-Portal file): 2x 30720 + 1x 2048 ---
+                // Taken over exactly like vanilla, and the raised literal is remembered.
+                foreach (int raised in new[] { 30720, 61440 })
+                {
+                    cases++;
+                    var patched = PrePatchedSendZDOs(raised);
+                    SendBudgetModule.Outcome op;
+                    SendBudgetModule.Rewrite(patched, false, out op);
+                    if (op != SendBudgetModule.Outcome.Rewritten) fails.Add("SendBudget: pre-patched " + raised + " not taken over (" + op + ")");
+                    if (CountCalls(patched, typeof(SendBudgetModule), "GetHighWaterBytes") != 2 ||
+                        CountCalls(patched, typeof(SendBudgetModule), "GetMinChunkBytes") != 1)
+                        fails.Add("SendBudget: pre-patched " + raised + " swapped wrong counts");
+                    if (SendBudgetModule.DetectedVanillaHighWater != raised)
+                        fails.Add("SendBudget: pre-patched literal recorded as " + SendBudgetModule.DetectedVanillaHighWater + ", wanted " + raised);
+                }
+
+                // --- 4c. shapes that must NOT be taken over: one 10240 only; extra literal ----
+                cases++;
+                var oneOnly = VanillaSendZDOs();
+                oneOnly.RemoveAt(3);                       // drop the second 10240
+                var oneBefore = Snapshot(oneOnly);
+                SendBudgetModule.Outcome o4c;
+                SendBudgetModule.Rewrite(oneOnly, false, out o4c);
+                if (o4c != SendBudgetModule.Outcome.Mismatch || !Same(oneBefore, Snapshot(oneOnly)))
+                    fails.Add("SendBudget: 1x 10240 + 1x 2048 was not a clean mismatch (" + o4c + ")");
+
+                cases++;
+                var extra = PrePatchedSendZDOs(30720);
+                extra.Insert(1, new CodeInstruction(OpCodes.Ldc_I4, 4096));
+                var extraBefore = Snapshot(extra);
+                SendBudgetModule.Outcome o4d;
+                SendBudgetModule.Rewrite(extra, false, out o4d);
+                if (o4d != SendBudgetModule.Outcome.Mismatch || !Same(extraBefore, Snapshot(extra)))
+                    fails.Add("SendBudget: 2x 30720 + 2048 + a stray 4096 was taken over (" + o4d + ")");
+
+                // --- 4d. the same wrong shape with a foreign transpiler present: conflict, not mismatch
+                cases++;
+                var foreignWrong = PrePatchedSendZDOs(30720);
+                foreignWrong.Insert(1, new CodeInstruction(OpCodes.Ldc_I4, 4096));
+                SendBudgetModule.Outcome o4e;
+                SendBudgetModule.Rewrite(foreignWrong, true, out o4e);
+                if (o4e != SendBudgetModule.Outcome.StoodDown)
+                    fails.Add("SendBudget: wrong shape + foreign transpiler did not stand down (" + o4e + ")");
+
+                // the real patch runs after this module (alphabetical order) and sets these itself;
+                // leave them as vanilla so nothing above leaks into the summary if it does not.
+                SendBudgetModule.DetectedVanillaHighWater = 10240;
+                SendBudgetModule.Detail = null;
+                SendBudgetModule.Quiet = false;
 
                 // --- 5. the same contract in a second module ---------------------------------
                 cases++;
@@ -114,6 +168,7 @@ namespace SmoothServer
             {
                 fails.Add("threw: " + e.Message);
             }
+            finally { SendBudgetModule.Quiet = false; }
 
             if (fails.Count == 0)
             {
@@ -207,6 +262,18 @@ namespace SmoothServer
                 new CodeInstruction(OpCodes.Blt),
                 new CodeInstruction(OpCodes.Ret)
             };
+        }
+
+        /// <summary>Vanilla's method after the old "network fix" hex patch: both 10240 operands raised, 2048 untouched.</summary>
+        private static List<CodeInstruction> PrePatchedSendZDOs(int raised)
+        {
+            var list = VanillaSendZDOs();
+            for (int i = 0; i < list.Count; i++)
+            {
+                int v;
+                if (ILUtil.TryGetI4(list[i], out v) && v == 10240) list[i].operand = raised;
+            }
+            return list;
         }
 
         /// <summary>
