@@ -1,5 +1,17 @@
 # Changelog — SmoothServer
 
+## 0.5.4 (unreleased)
+
+Diagnostics
+
+* **LagProbe times mining and woodcutting too.** The hit-registration timer hooked `Character`, `Destructible` and
+  `WearNTear` only, so a pickaxe on ore (`MineRock5`/`MineRock`) and an axe on a tree (`TreeBase`/`TreeLog`) - half of
+  what a group does in a cave - were never measured. They are now.
+* **LagProbe counts the swings you own.** A hit on an object this client owns is applied in the same frame; it used to be
+  skipped outright, which meant a future claim-on-hit fix would look like the histogram "improving" by losing its samples.
+  It is now counted as `local=N` next to `hits=N` in both the client summary and the server line. Report format v2; a
+  0.5.3 client's v1 report is still read (`local=?`).
+
 ## 0.5.3 (2026-09-17)
 
 Compatibility

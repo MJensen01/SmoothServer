@@ -92,7 +92,8 @@ namespace SmoothServer
         private const string RpcLagReport = "SS_LagReport";
 
         /// <summary>Wire version of the SS_LagReport package.</summary>
-        private const int ReportVersion = 1;
+        private const int ReportVersion = 2;          // 2 (0.5.4): + local-apply count after hits
+        private const int OldestReportVersion = 1;    // still parsed: 0.5.1-0.5.3 clients
         /// <summary>A report bigger than this is not one of ours; drop it unread.</summary>
         private const int MaxReportBytes = 4096;
         /// <summary>Owners carried in a report, both sides.</summary>
@@ -190,6 +191,9 @@ namespace SmoothServer
         private static readonly List<float> FrameSorted = new List<float>(MaxFrameSamples);
         private static readonly Dictionary<long, OwnerStat> ByOwner = new Dictionary<long, OwnerStat>();
         private static int _hitLate;
+        /// <summary>Swings on objects this client OWNS: vanilla applies them in the same frame, 0 ms. Counted, never timed,
+        /// so that once CombatOwnership claims on hit the histogram does not "improve" by simply losing its samples.</summary>
+        private static int _hitsLocal;
         private static int _hitTimeouts;
         private static int _churn;
         private static float _frameMsEma = 16.7f;
@@ -246,6 +250,7 @@ namespace SmoothServer
             public float MaxMs;
             public int Late;
             public int Timeouts;
+            public int Local;
             public float ChurnPerMin;
             public float FrameMs;
             public float ReceivedAt;
@@ -310,6 +315,10 @@ namespace SmoothServer
                 PatchDamage(typeof(Character), nameof(CharacterDamagePostfix));
                 PatchDamage(typeof(Destructible), nameof(DestructibleDamagePostfix));
                 PatchDamage(typeof(WearNTear), nameof(WearNTearDamagePostfix));
+                PatchDamage(typeof(MineRock5), nameof(MineRock5DamagePostfix));
+                PatchDamage(typeof(MineRock), nameof(MineRockDamagePostfix));
+                PatchDamage(typeof(TreeBase), nameof(TreeBaseDamagePostfix));
+                PatchDamage(typeof(TreeLog), nameof(TreeLogDamagePostfix));
 
                 var setOwner = AccessTools.Method(typeof(ZDO), "SetOwner", new[] { typeof(long) });
                 if (setOwner == null) throw new Exception("ZDO.SetOwner(long) not found");
@@ -413,7 +422,7 @@ namespace SmoothServer
             FrameSamples.Clear();
             ByOwner.Clear();
             ResetChurn();
-            _hitLate = 0; _hitTimeouts = 0; _churn = 0;
+            _hitLate = 0; _hitTimeouts = 0; _hitsLocal = 0; _churn = 0;
             _pingAcc = 0f; _summaryAcc = 0f; _frameSampleAcc = 0f;
         }
 
@@ -715,6 +724,21 @@ namespace SmoothServer
                     __instance != null ? __instance.gameObject : null);
         }
 
+        // 0.5.4: ore, rocks and trees - the cave complaint was vines AND ore, and mining was never timed.
+        // These four keep m_nview private, so the view comes off the GameObject.
+        private static void MineRock5DamagePostfix(MineRock5 __instance) { NoteHitOn(__instance); }
+        private static void MineRockDamagePostfix(MineRock __instance) { NoteHitOn(__instance); }
+        private static void TreeBaseDamagePostfix(TreeBase __instance) { NoteHitOn(__instance); }
+        private static void TreeLogDamagePostfix(TreeLog __instance) { NoteHitOn(__instance); }
+
+        private static void NoteHitOn(MonoBehaviour mb)
+        {
+            if (mb == null) return;
+            ZNetView nv = null;
+            try { nv = mb.GetComponent<ZNetView>(); } catch { }
+            NoteHit(nv, mb.gameObject);
+        }
+
         private static void NoteHit(ZNetView nview, GameObject go)
         {
             if (!Active || _serverHalf) return;
@@ -725,8 +749,12 @@ namespace SmoothServer
                 if (zdo == null) return;
 
                 long owner = zdo.GetOwner();
-                // We own it (or nobody does): vanilla applies the hit locally, nothing to measure.
-                if (owner == 0L || owner == ZDOMan.GetSessionID()) return;
+                // We own it: vanilla applied the hit in this very call, 0 ms. Count it so the share of
+                // local vs remote swings is visible; nothing to time.
+                if (owner == ZDOMan.GetSessionID()) { _hitsLocal++; return; }
+                // Nobody owns it yet: the RPC goes nowhere useful and vanilla sorts ownership out
+                // first. Not a measurement of anything.
+                if (owner == 0L) return;
 
                 if (Pending.Count >= MaxPendingHits) return;
                 var id = zdo.m_uid;
@@ -963,6 +991,7 @@ namespace SmoothServer
                 pkg.Write(ReportVersion);
                 pkg.Write(window);
                 pkg.Write(n);
+                pkg.Write(_hitsLocal);            // v2
                 pkg.Write(Pct(Sorted, 50));
                 pkg.Write(Pct(Sorted, 95));
                 pkg.Write(n == 0 ? 0f : Sorted[n - 1]);
@@ -1009,13 +1038,15 @@ namespace SmoothServer
                 if (peer == null || !peer.IsReady()) return;   // not a ready peer: ignore
 
                 pkg.SetPos(0);
-                if (pkg.ReadInt() != ReportVersion) return;
+                int ver = pkg.ReadInt();
+                if (ver < OldestReportVersion || ver > ReportVersion) return;
 
                 ClientReport r;
                 if (!Reports.TryGetValue(sender, out r)) { r = new ClientReport(); Reports[sender] = r; }
                 r.Uid = sender;
                 r.WindowSec = pkg.ReadSingle();
                 r.Hits = pkg.ReadInt();
+                r.Local = ver >= 2 ? pkg.ReadInt() : -1;   // -1 = an older client, unknown
                 r.P50Ms = pkg.ReadSingle();
                 r.P95Ms = pkg.ReadSingle();
                 r.MaxMs = pkg.ReadSingle();
@@ -1051,6 +1082,7 @@ namespace SmoothServer
               .Append(string.IsNullOrEmpty(playerName) ? r.Uid.ToString() : playerName)
               .Append("' ").Append(r.WindowSec.ToString("F0")).Append("s: ")
               .Append("hits=").Append(r.Hits)
+              .Append(" local=").Append(r.Local < 0 ? "?" : r.Local.ToString())
               .Append(" p50=").Append(r.P50Ms.ToString("F0")).Append("ms")
               .Append(" p95=").Append(r.P95Ms.ToString("F0")).Append("ms")
               .Append(" max=").Append(r.MaxMs.ToString("F0")).Append("ms")
@@ -1153,10 +1185,10 @@ namespace SmoothServer
             Sorted.Sort();
             int n = Sorted.Count;
             outLines.Add(string.Format(
-                "[LagProbe] client {0:F0}s: hits={1} p50={2:F0}ms p95={3:F0}ms max={4:F0}ms late={5}(>{6}ms) " +
+                "[LagProbe] client {0:F0}s: hits={1} local={10} p50={2:F0}ms p95={3:F0}ms max={4:F0}ms late={5}(>{6}ms) " +
                 "timeouts={7} ownerChurn={8}/min pending={9}",
                 window, n, Pct(Sorted, 50), Pct(Sorted, 95), n == 0 ? 0f : Sorted[n - 1],
-                _hitLate, HitLogThresholdMs, _hitTimeouts, _churn * 60f / window, Pending.Count));
+                _hitLate, HitLogThresholdMs, _hitTimeouts, _churn * 60f / window, Pending.Count, _hitsLocal));
 
             if (ByOwner.Count > 0)
             {
@@ -1208,6 +1240,7 @@ namespace SmoothServer
             ByOwner.Clear();
             _hitLate = 0;
             _hitTimeouts = 0;
+            _hitsLocal = 0;
             _churn = 0;
         }
 
