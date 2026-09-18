@@ -98,12 +98,16 @@ namespace SmoothServer
         public override string Name => "PriorityLane";
         public override ModuleSide Side => ModuleSide.Both;
         public override string Section => "PriorityLane";
+        /// <summary>OFF by default in 0.6.0: the shaper is proven by 31 unit cases and an idle boot, but it has not yet
+        /// moved a real peer's bytes. Switch it on for a session whose LagProbe/PeerTelemetry lines you will read.</summary>
+        public override bool DefaultEnabled => false;
 
         protected override string EnabledDescription =>
             "Shape this machine's outgoing Steam traffic: hold the backlog in a managed priority " +
             "queue and hand Steam only about one bandwidth-delay product at a time, so a hit RPC " +
             "no longer waits behind tens of kilobytes of bulk ZDO data inside Steam's own buffer. " +
-            "Send ORDER only - every byte stays vanilla-legal, so unmodded clients benefit too.";
+            "Send ORDER only - every byte stays vanilla-legal, so unmodded clients benefit too. " +
+            "OFF by default in 0.6.0 (not yet measured with real players); turning it on needs a restart.";
 
         // ---- documented vanilla wire hashes (asserted against the game at patch time) ----------
 

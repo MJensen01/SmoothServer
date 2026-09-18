@@ -1118,8 +1118,12 @@ namespace SmoothServer.Net
             st.Plain.Clear();
             RecountFramed();
             if (first)
-                Log.LogError("[Compression] " + who + " compression disabled (" + reason +
-                             ") - running plain");
+            {
+                // The startup self-test drives a "sim-client" through this exact path on purpose; that is a
+                // PASS, not an error worth a red line in every boot log.
+                string line = "[Compression] " + who + " compression disabled (" + reason + ") - running plain";
+                if (who != null && who.StartsWith("sim-")) Log.LogInfo(line); else Log.LogError(line);
+            }
         }
 
         /// <summary>

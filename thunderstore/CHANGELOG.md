@@ -1,6 +1,31 @@
 # Changelog — SmoothServer
 
-## 0.5.4 (unreleased)
+## 0.6.0 (2026-09-18)
+
+Hit registration
+
+* **CombatOwnership (client, ON by default): claim on hit for static objects.** On a dedicated server, damage is applied by
+  whichever player's PC happens to own the object, so a swing at a vine, an ore vein or a tree that somebody else owns
+  travels you → server → owner and its result comes back owner → server → you, each leg behind that peer's send queue.
+  That is the half-second before a vine breaks. Now, when the local player is the attacker, the client takes ownership of
+  the object first (`ZNetView.ClaimOwnership()`, the same local, instant call vanilla itself uses in 14 places) and
+  vanilla applies the hit on your own machine in the same frame; only the health change travels, one leg instead of
+  three. Statics only: `Destructible`, `MineRock5`, `MineRock`, `WearNTear`, `TreeBase`, `TreeLog`. Guards: never a player
+  ZDO, never anything on a ship or cart, never inside a ward you cannot access, never a building piece another online
+  player owns, never beyond `MaxDistance` (16 m), and any failure in the check falls back to the vanilla swing. **Creatures
+  are deliberately not claimed** in this version (Stage 2 needs its own hysteresis so two players cannot both run a
+  Seeker's death and duplicate its loot); they still benefit from the queue work below. `[CombatOwnership] Enabled` is
+  server-synced and turns off live. Interop note: NoVikingLeftBehind's FastMining bonuses now run on the attacker after a
+  claim (same code, different machine) - ore yields and regrowth are on the re-test list.
+* **PriorityLane (server, OFF by default): a shaper in front of Steam's single reliable lane.** Holds the outgoing backlog
+  in a managed priority queue (routed RPCs and freshly damaged objects first, bulk world updates after) and hands Steam
+  only about one bandwidth-delay product at a time, so a hit RPC no longer waits behind tens of kilobytes inside Steam's
+  own buffer. Send order only, every byte stays vanilla-legal, so unmodded clients benefit too. Hard ordering guards: a
+  routed RPC is never promoted ahead of the ZDO it targets, `DestroyZDO` is never promoted, the compression handshake
+  RPCs are barriers nothing may overtake, and no package is ever split or copied. 31 headless self-test cases cover the
+  wire classifier, the queue and the guards, but the shaper has not yet moved a real player's bytes, so it ships **off**;
+  switch `[PriorityLane] Enabled = true` for a session you will watch (needs a restart) and read `[PeerTelemetry]`
+  socketQueue and `[LagProbe]` afterwards.
 
 Diagnostics
 
