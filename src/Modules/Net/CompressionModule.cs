@@ -780,8 +780,16 @@ namespace SmoothServer.Net
         /// </summary>
         private static void ProtectQueuedPlain(ZSteamSocket sock, PeerState st)
         {
-            if (sock == null || sock.m_sendQueue == null) return;
-            foreach (var pkt in sock.m_sendQueue) if (pkt != null) st.Plain.Add(pkt);
+            if (sock == null) return;
+            if (sock.m_sendQueue != null)
+                foreach (var pkt in sock.m_sendQueue) if (pkt != null) st.Plain.Add(pkt);
+
+            // 0.6.0: PriorityLane holds the backlog in ITS queues, not m_sendQueue, so a package
+            // produced before the flip may not be in the socket queue at all right now. It is still
+            // logically before our SS_Ready and the peer will read it as plain, so it must be
+            // protected too. (PriorityLane only ever holds raw packages - it runs before this
+            // module's framing prefix - so there is nothing to un-frame, only to mark.)
+            PriorityLaneModule.CollectHeld(sock, st.Plain);
         }
 
         /// <summary>
