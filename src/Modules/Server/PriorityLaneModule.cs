@@ -374,9 +374,28 @@ namespace SmoothServer
         public override void Disable()
         {
             Active = false;
+            // Anything we were holding is raw and unsent: give it back to Steam's own queue before
+            // we step aside, or a live Enabled=false would silently drop hit RPCs and world updates.
+            foreach (var kv in Lanes) HandBack(kv.Key, kv.Value);
             Lanes.Clear();
             Hot.Clear();
             base.Disable();
+        }
+
+        /// <summary>Return every held package to the socket's vanilla queue (prio first, then bulk) and empty the lane.</summary>
+        private static void HandBack(ZSteamSocket sock, Lane lane)
+        {
+            try
+            {
+                if (sock == null || lane == null) return;
+                var q = sock.m_sendQueue;
+                if (q == null) return;
+                var held = new List<byte[]>();
+                lane.Queue.CollectAll(held);
+                lane.Queue.Clear();
+                foreach (var d in held) q.Enqueue(d);
+            }
+            catch (Exception e) { WarnOnce("handback", e); }
         }
 
         public override string StatusDetail()
@@ -393,20 +412,27 @@ namespace SmoothServer
         private static bool SendPrefix(ZSteamSocket __instance)
         {
             if (!Active || InflightCap <= 0) return true;
+            Lane lane = null;
             try
             {
                 if (__instance == null || !__instance.IsConnected()) return true;
                 var q = __instance.m_sendQueue;
                 if (q == null) return true;
 
-                var lane = LaneFor(__instance);
+                lane = LaneFor(__instance);
                 Intake(__instance, lane, q);
                 Refill(__instance, lane);
             }
             catch (Exception e)
             {
-                // Shaping must never break the send path. Fall back to vanilla for this call.
-                WarnOnce("shaper", e);
+                // Shaping must never break the send path and must never eat a package: hand this
+                // socket's held packages back to vanilla's queue and disarm for the rest of the
+                // session (a throwing shaper is not one to keep re-running every 33 ms).
+                SmoothServerPlugin.Log.LogError("[PriorityLane] shaper threw - disarmed for this session, every held package handed back to Steam: " + e);
+                Active = false;
+                foreach (var kv in Lanes) HandBack(kv.Key, kv.Value);
+                Lanes.Clear();
+                SmoothServerPlugin.MarkStatus("PriorityLane", "disabled(threw)");
             }
             return true;
         }
