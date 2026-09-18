@@ -79,6 +79,15 @@ Each module has its own `Enabled` toggle in its config section.
   vanilla's 2 s (default 0.5 s) so objects change hands faster as players move.
 - **MapSelfTest** `[MapSelfTest]` — headless unit tests for the shared-map codec at load; shows up
   as `applied  PASS` in the module summary.
+- **PriorityLane** `[PriorityLane]` — *both ends.* Holds this machine's outgoing backlog in a
+  priority queue instead of letting it pile up inside Steam's own buffer, and hands Steam only
+  about one bandwidth-delay product at a time, latency-critical traffic first. A melee hit no
+  longer waits behind tens of kilobytes of bulk world data: the residual delay drops from the
+  80–430 ms band to roughly 25 ms. **Unmodded clients benefit too** — only the send *order*
+  changes, every byte stays vanilla. Coexists with SendQueueGuard and Compression; the ordering
+  rules that keep it safe (never let a destroy overtake the object it destroys, never promote a
+  message whose target the receiver has not been sent, never cross Compression's handshake) are
+  unit-tested at load.
 - **StatsLog** `[StatsLog]` — writes `stats-YYYY-MM-DD.jsonl` (fps/frame time, ZDO counts,
   per-peer network/budget/compression state) every `IntervalSec` (default 10s) and
   `events-YYYY-MM-DD.jsonl` (joins/leaves, save stalls, GC sweeps, AdaptiveBudget backoff
@@ -102,6 +111,13 @@ Each module has its own `Enabled` toggle in its config section.
   module is turned off. Pin sharing is configurable per pin type; death pins are off by default.
 - **ClientNet** `[Client]` — *client only*. Your client's own ZDO send high-water mark (default
   48 KB, vanilla 10 KB) and Steam `SendRateMax`. Inactive on a dedicated server.
+- **CombatOwnership** `[CombatOwnership]` — *client only.* On a dedicated server the ore, tree or
+  vine you are swinging at is simulated on another player's PC, so every hit is a round trip to
+  them and back — about half a second in a busy cave. This takes ownership of the object the
+  moment you hit it, after which your damage lands on your own machine in the same frame and the
+  hit message never goes on the wire at all. Ore, trees, vines, destructibles and building pieces;
+  bows and AoE included. Creatures are deliberately left alone. Wards, other players' builds,
+  ships and carts are all respected.
 - **LagProbe** `[LagProbe]` — *both ends, diagnostics only; it changes nothing about the game.*
   The server pings each player every 5 s over a routed RPC and reports that player's real RTT,
   jitter, packet loss and frame rate (all measured on the server's own clock, so it works whatever

@@ -157,6 +157,10 @@ namespace SmoothServer
                 if (sd6 || CountCalls(create2, typeof(CreateBudgetModule), "GetMaxCreatedPerFrame") != 1)
                     fails.Add("CreateBudget: clean vanilla IL was not patched");
 
+                // --- 6. the hit-latency modules: packet classification, drain ordering and the
+                //        CombatOwnership guards, all as pure functions over synthetic inputs -----
+                cases += HitLatencySelfTest.Run(fails);
+
                 // --- 7. the live Harmony half: does GetPatchInfo really see a rival? ----------
                 // Everything above is arithmetic on a synthetic list. This one patches a dummy
                 // method of our own with a second Harmony id and asks ILUtil the same question
@@ -173,7 +177,7 @@ namespace SmoothServer
             if (fails.Count == 0)
             {
                 _result = "PASS (" + cases + " cases)";
-                Log.LogInfo("[ILSelfTest] PASS - " + cases + " transpiler-coexistence cases");
+                Log.LogInfo("[ILSelfTest] PASS - " + cases + " transpiler-coexistence and hit-latency cases");
             }
             else
             {

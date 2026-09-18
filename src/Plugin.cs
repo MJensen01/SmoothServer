@@ -28,7 +28,7 @@ namespace SmoothServer
     {
         public const string PluginGuid = "Nosferatu.SmoothServer";
         public const string PluginName = "SmoothServer";
-        public const string PluginVersion = "0.5.3";
+        public const string PluginVersion = "0.6.0";
 
         internal static ManualLogSource Log;
         internal static ConfigFile Cfg;
@@ -323,6 +323,7 @@ namespace SmoothServer
             FrameRateModule.Tick(dt);
             CompressionModule.Tick(dt);
             LagProbeModule.Tick(dt);
+            PriorityLaneModule.Tick(dt);
             SharedMapModule.Tick(dt);
             ServerModules.Tick(dt);
 
